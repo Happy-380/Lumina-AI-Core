@@ -1,8 +1,23 @@
-# Lumina-AI
+# Lumina-AI-Core
 
 一个基于 **llama.cpp + 本地 GGUF 模型** 的全能 AI 助手（.NET 8 控制台应用）。
 
 Lumina-AI 完全离线运行，集成了本地大模型对话、Miya 语言风格转换、角色扮演（埃文 / 米娅）、以及通过 MCP 协议操控 Windows 电脑的能力。
+
+Lumina-AI 使用 Bonsai 家族的模型，它们是 1-Bit LLM 。也就是说，它们的资源开销极小，但能为你的应用程序提供强劲的性能。
+
+> **Core是“核心”的意思，也就是说，它只实现处理输入，就像人的大脑一样，所以它并不是一个图形化窗口，而是一个控制台。这个项目的构建目的就是实现一个本地的、高效的、安全的AI后端，并且完全可控，易于拓展和使用。完整的图形化应用程序可以查阅我（`Happy-380`）的`380AI`项目，不过到目前我们还没有为它适配`Lumina-AI-Core`，尽请期待吧~**
+
+## 📇目录
+1. **功能特性**
+2. **技术栈**
+3. **目录结构**
+4. **环境要求**
+5. **构建与运行**
+6. **使用说明**
+7. **配置说明**
+8. **核心实现要点**
+9. **注意事项**
 
 ## ✨ 功能特性
 
@@ -53,11 +68,32 @@ Lumina-AI/
 - **Windows**（依赖 Win32 API 内存查询与控制台 ANSI 颜色）
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
 - 建议内存：
-  - Fast（1.7B）：≥ 8 GB
-  - Balanced（4B）：≥ 16 GB
-  - Quality（8B）：≥ 24 GB（程序会按可用内存自动计算上下文长度）
+  - Fast（1.7B）：≥ 4 GB
+  - Balanced（4B）：≥ 8 GB
+  - Quality（8B）：≥ 16 GB
+  **程序会按可用内存自动计算上下文长度**
+ - 最低运行内存：2GB（但易崩溃，除非你的硬件资源及其有限，否则**不推荐**）
 
 ## 🚀 构建与运行
+
+请下载`Release`中的`llama.zip.001`，`llama.zip.002`和`mcp.zip`。然后双击打开`llama.zip.001`，解压出其中的`llama`文件夹并放置在项目的根目录。再双击打开`mcp.zip`，解压出其中的`mcp`文件夹，也放置在项目根目录。最终文件夹结构应如下所示。
+```
+Lumina-AI/
+├── Lumina-AI.csproj              # 项目文件（net8.0）
+├── Lumina-AI.sln                 # 解决方案
+├── Program.cs                    # 入口 + 核心服务（LlamaChatService、上下文/缓存/检索器）
+├── LuminaOptions.cs               # 可调配置（宿主注入回调/事件，类库 API）
+├── StyleTransferService.cs       # Miya 语言风格转换服务（增量生成 + 语义漂移停止）
+├── CharacterIdentityService.cs   # 角色身份模板（埃文 / 米娅）
+├── llama/                        # llama.cpp 运行时 + 模型（构建时复制到输出目录）
+│   ├── llama-server.exe          # 推理服务器
+│   ├── Bonsai-1.7B.gguf          # Fast 模式
+│   ├── Bonsai-4B.gguf            # Balanced 模式（默认）
+│   ├── Bonsai-8B.gguf            # Quality 模式
+│   └── Qwen2.5-0.5B-Q4_K_M.gguf  # 风格转换模型
+└── mcp/
+    └── WindowsMcp.exe            # MCP 服务器（Windows 操控工具）
+```
 
 ### 双模式构建
 
@@ -375,7 +411,7 @@ await service.DisposeAsync();
 
 ### StyleTransferService
 
-- 移植自 Python 原型，通过 `/completion` + `cache_prompt` 增量生成。
+- 通过 `/completion` + `cache_prompt` 增量生成。
 - **语义漂移停止准则**：比较生成窗口与原文 token 集合的相似度，相似度回落（当前 < 峰值 × 0.70）或多样性过低时停止，防止模型"复读"原文。
 - 启动时预热停用词 / 标点 token ID，用于漂移检测。
 - Markdown 逐行转换：代码块、表格、图片、脚注定义整体跳过；标题 / 列表 / 引用提取前缀后仅转换正文；链接仅转换描述文字；中英文分别用 Z 占位符 / 命名占位符保护行内格式。
@@ -392,3 +428,4 @@ await service.DisposeAsync();
 - `WindowsMcp.exe` 为第三方 MCP 服务器，允许 AI 操控电脑存在安全风险，请仅在可信环境中使用。
 - 程序退出时会主动清理所有 `llama-server` 进程；MCP 客户端释放可能挂起，内置了 5 秒超时保护。
 - 风格转换服务器为懒加载，仅在第一次选择 Miya 角色时启动。
+- **项目不会自动保存历史记录，关闭程序后以前的上下文就会删除！**
