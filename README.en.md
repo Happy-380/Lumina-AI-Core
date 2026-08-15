@@ -432,3 +432,6 @@ await service.DisposeAsync();
 - Upon exit, the program actively cleans up all `llama-server` processes. MCP client disposal may hang; a 5‑second timeout guard is built in.
 - The style‑transfer server is lazy‑loaded, starting only when the Miya role is selected for the first time.
 - **The project does not automatically save conversation history – all context is lost when the program is closed!**
+
+---
+**Enjoy your experience\~❤️**
