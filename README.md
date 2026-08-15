@@ -60,7 +60,24 @@ Lumina-AI/
   - Quality（8B）：≥ 24 GB（程序会按可用内存自动计算上下文长度）
 
 ## 🚀 构建与运行
-
+克隆此仓库，并下载`Release`中的`llama.zip.001`，`llama.zip.002`和`mcp.zip`。然后双击打开`llama.zip.001`，解压出其中的`llama`文件夹并放置在项目的根目录。再双击打开`mcp.zip`，解压出其中的`mcp`文件夹，也放置在项目根目录。最终文件夹结构应如下所示。
+```
+Lumina-AI/
+├── Lumina-AI.csproj              # 项目文件（net8.0）
+├── Lumina-AI.sln                 # 解决方案
+├── Program.cs                    # 入口 + 核心服务（LlamaChatService、上下文/缓存/检索器）
+├── LuminaOptions.cs               # 可调配置（宿主注入回调/事件，类库 API）
+├── StyleTransferService.cs       # Miya 语言风格转换服务（增量生成 + 语义漂移停止）
+├── CharacterIdentityService.cs   # 角色身份模板（埃文 / 米娅）
+├── llama/                        # llama.cpp 运行时 + 模型（构建时复制到输出目录）
+│   ├── llama-server.exe          # 推理服务器
+│   ├── Bonsai-1.7B.gguf          # Fast 模式
+│   ├── Bonsai-4B.gguf            # Balanced 模式（默认）
+│   ├── Bonsai-8B.gguf            # Quality 模式
+│   └── Qwen2.5-0.5B-Q4_K_M.gguf  # 风格转换模型
+└── mcp/
+    └── WindowsMcp.exe            # MCP 服务器（Windows 操控工具）
+```
 ### 双模式构建
 
 项目支持两种应用模式，通过 `-p:BuildAsLibrary` 切换：
