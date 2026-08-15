@@ -35,6 +35,7 @@ Lumina-AI/
 ├── Lumina-AI.csproj              # 项目文件（net8.0）
 ├── Lumina-AI.sln                 # 解决方案
 ├── Program.cs                    # 入口 + 核心服务（LlamaChatService、上下文/缓存/检索器）
+├── LuminaOptions.cs               # 可调配置（宿主注入回调/事件，类库 API）
 ├── StyleTransferService.cs       # Miya 语言风格转换服务（增量生成 + 语义漂移停止）
 ├── CharacterIdentityService.cs   # 角色身份模板（埃文 / 米娅）
 ├── llama/                        # llama.cpp 运行时 + 模型（构建时复制到输出目录）
@@ -58,10 +59,23 @@ Lumina-AI/
 
 ## 🚀 构建与运行
 
-```bash
-# 构建
-dotnet build -c Release
+### 双模式构建
 
+项目支持两种应用模式，通过 `-p:BuildAsLibrary` 切换：
+
+```bash
+# 模式 1：控制台应用（默认）
+dotnet build -c Release              # 生成 Lumina-AI.exe
+
+# 模式 2：类库（供其他项目引用）
+dotnet build -c Release -p:BuildAsLibrary=true   # 生成 Lumina-AI.dll
+```
+
+类库模式下会自动通过 `LIBRARY_MODE` 条件编译排除控制台入口 `Program.Main`，只暴露 `LlamaChatService` / `LuminaOptions` 等公共 API。
+
+### 运行控制台应用
+
+```bash
 # 运行（默认 Balanced 模式）
 dotnet run --project Lumina-AI.csproj
 
@@ -114,9 +128,9 @@ Lumina-AI.exe --history history.json
 
 > 工具名单见 `Program.cs` 中 `_dangerousTools` 集合，可按需增删。
 
-## 🔧 配置说明
+## ⚙️ 配置说明
 
-所有可调参数集中在 `Program.cs` 的 `AppConfig` 静态类中：
+所有可调参数集中在 `LuminaOptions` 类（`LuminaOptions.cs`）中，其默认值取自原 `AppConfig` 静态常量（`Program.cs`）：
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -128,8 +142,10 @@ Lumina-AI.exe --history history.json
 | `HistoryRetrievalTopK` | 5 | 历史检索召回条数 |
 | `RelevanceCheckRounds` | 5 | 相关性判断参考最近 N 轮 |
 | `RelevanceThreshold` | 0.3 | 相关性阈值 |
-| `DefaultMode` | Balanced | 默认模型模式 |
+| `DefaultMode` | Balanced | 默认模型模式（`LuminaOptions.InitialMode`） |
 | `StyleTransferPort` | 38090 | 风格转换服务器端口 |
+
+> 风格转换相关配置（`StyleTransferPort` / `StyleTransferModel` / `StyleTransferContextSize`）由 `StyleTransferService` 内部管理，不对外开放配置。
 
 ### 端口规划
 
@@ -139,6 +155,214 @@ Lumina-AI.exe --history history.json
 | 38081 | Balanced 模式（Bonsai-4B） |
 | 38082 | Fast 模式（Bonsai-1.7B） |
 | 38090 | 风格转换（Qwen2.5-0.5B） |
+
+## 📦 类库 API（预留接口）
+
+项目已为打包为类库做好准备：所有控制台交互均抽象为**回调/事件**，宿主程序可自由注入自己的 UI 实现。
+
+### 1. 可调配置 `LuminaOptions`（语言风格转换器配置除外）
+
+```csharp
+var options = new LuminaOptions
+{
+    InitialMode = ModelMode.Balanced,      // 初始模型模式
+    ManualContextSize = 16384,             // 手动上下文长度（null = 按内存自动计算）
+    MaxResponseTokens = 1024,              // 单次回答最大 token
+    EnableSemanticCache = true,            // 语义缓存
+    SimilarityThreshold = 0.85,            // 缓存命中阈值
+    MaxCacheEntries = 100,
+    HistoryRetrievalTopK = 5,              // 历史检索召回条数
+    RelevanceCheckRounds = 5,              // 相关性判断轮数
+    RelevanceThreshold = 0.3,
+    MaxToolCallIterations = 10,            // 工具调用循环上限
+    LlamaFolderName = "llama",             // llama.cpp 目录
+    McpFolderName = "mcp",                 // MCP 目录
+    McpExeName = "WindowsMcp.exe",
+    SystemPrompt = "...",                  // 自定义普通对话系统提示词
+    ControlSystemPrompt = "...",           // 自定义操控模式系统提示词
+
+    // 回调（UI 无关）：
+    ConfirmCallback = async prompt => true,     // 用户确认（未设置时默认拒绝，安全）
+    LogCallback = (level, msg) => Console.WriteLine(msg) // 日志
+};
+```
+
+> 也可通过 `options.ModelFiles` / `options.ModelPorts` 覆盖模型文件与端口映射（`null` 时使用默认）。
+
+### 2. 服务生命周期（异步初始化）
+
+```csharp
+await using var service = new LlamaChatService(options); // 构造函数只做内存初始化，不启动进程
+await service.InitializeAsync();                          // 启动 llama-server + MCP
+// ... 使用 ...
+await service.DisposeAsync();                             // 清理进程与资源
+```
+
+### 3. 从外部导入上下文
+
+```csharp
+// 导入整段历史（JSON 数组）
+service.ImportHistory(jArray);
+service.ImportHistoryFromFile("history.json");
+
+// 逐条导入（同时写入检索索引）
+service.AddContextMessage("user", "内容");
+service.AddContextMessage("assistant", "内容");
+
+// 自定义系统提示词
+service.SetSystemPrompt("普通对话提示词", "操控模式提示词");
+
+// 导出当前上下文
+JArray history = service.CurrentHistory;
+```
+
+### 4. 发送消息与接收回答
+
+```csharp
+// 方式一：返回值（推荐）
+string answer = await service.SendMessageAsync("你好");          // 按 SelectedRole 决定是否风格转换
+string answer = await service.SendMessageAsync("你好", LlamaChatService.ChatRole.MiyaBonsai); // 显式指定角色
+
+// 方式二：事件订阅（每轮完成时触发：(用户输入, 回答)）
+service.AnswerReceived += (input, answer) => Console.WriteLine($"{input} → {answer}");
+
+// 角色模板直接回复（问候/身份/自我介绍/个人偏好，不走 AI；命中时自动记录上下文并触发 AnswerReceived）
+string? template = service.GetTemplateReply("你好", LlamaChatService.ChatRole.MiyaBonsai);
+
+// 其他
+await service.SwitchModeAsync(ModelMode.Quality); // 热切换模型
+service.ClearHistory();                            // 清除历史
+service.GetCacheStats();                           // 缓存统计
+```
+
+> 未注入 `ConfirmCallback` 时，AI 操控电脑的操作会被**默认拒绝**（安全默认），宿主可自行实现弹窗/按键等确认 UI。
+
+### 5. 完整使用实例（控制台宿主）
+
+#### 5.1 引用类库
+
+在宿主项目（如 WinForms / WPF / ASP.NET Core / 控制台）的 csproj 中添加引用：
+
+```xml
+<ItemGroup>
+  <!-- 方式一：项目引用（推荐，随源码同步更新） -->
+  <ProjectReference Include="..\Lumina-AI\Lumina-AI.csproj" />
+
+  <!-- 方式二：DLL 引用（先以 -p:BuildAsLibrary=true 构建类库） -->
+  <!-- <Reference Include="Lumina-AI">
+       <HintPath>..\Lumina-AI\bin\Release\net8.0\Lumina-AI.dll</HintPath>
+     </Reference> -->
+</ItemGroup>
+```
+
+> **部署注意**：服务运行时从 `AppDomain.CurrentDomain.BaseDirectory`（宿主程序输出目录）查找 `llama/` 与 `mcp/` 目录。
+> 引用类库不会自动传递内容文件，需将 `llama/`（含 GGUF 模型）与 `mcp/`（WindowsMcp.exe）复制到宿主输出目录，例如：
+>
+> ```xml
+> <ItemGroup>
+>   <Content Include="..\Lumina-AI\llama\**\*.*"
+>            Link="llama\%(RecursiveDir)%(Filename)%(Extension)"
+>            CopyToOutputDirectory="PreserveNewest" />
+>   <Content Include="..\Lumina-AI\mcp\WindowsMcp.exe"
+>            Link="mcp\WindowsMcp.exe"
+>            CopyToOutputDirectory="PreserveNewest" />
+> </ItemGroup>
+> ```
+
+#### 5.2 完整示例代码
+
+```csharp
+using LlamaChat;              // LuminaOptions / LlamaChatService / ModelMode / LogLevel
+using Newtonsoft.Json.Linq;   // 导入 / 导出历史
+
+// ============================================================
+// 1. 配置：注入宿主自己的确认 UI 与日志（控制台示例）
+// ============================================================
+var options = new LuminaOptions
+{
+    InitialMode = ModelMode.Balanced,   // 初始模型：Bonsai-4B
+    ManualContextSize = 16384,          // 手动上下文长度；不设则按可用内存自动计算
+    MaxResponseTokens = 1024,
+    EnableSemanticCache = true,
+    RelevanceCheckRounds = 5,
+
+    // 确认回调：AI 操控电脑 / 危险操作时触发。
+    // 在 WinForms / WPF 中可换成 MessageBox 等弹窗；返回 true 才允许执行。
+    ConfirmCallback = prompt =>
+    {
+        Console.WriteLine();
+        Console.Write($"{prompt} (y/n): ");
+        var key = Console.ReadKey();
+        Console.WriteLine();
+        return Task.FromResult(key.KeyChar is 'y' or 'Y');
+    },
+
+    // 日志回调：服务内部的所有状态输出都走这里
+    LogCallback = (level, msg) => Console.WriteLine($"[{level}] {msg}"),
+};
+
+// ============================================================
+// 2. 创建服务并启动（构造函数只做内存初始化，不启动进程）
+// ============================================================
+await using var service = new LlamaChatService(options);
+await service.InitializeAsync();      // 启动 llama-server + MCP
+
+// ============================================================
+// 3. 接收回答（事件方式，每轮对话完成时触发）
+// ============================================================
+service.AnswerReceived += (input, answer) =>
+    Console.WriteLine($"\n助手: {answer}\n");
+
+// ============================================================
+// 4. 从外部导入上下文
+// ============================================================
+// 4a. 逐条导入（同时写入 BM25 检索索引，供后续相关性召回）
+service.AddContextMessage("user", "我叫小明，喜欢摄影。");
+service.AddContextMessage("assistant", "很高兴认识你，小明！");
+
+// 4b. 整段导入（JSON 数组，与导出格式一致）
+service.ImportHistory(JArray.Parse("""
+    [
+      { "role": "user", "content": "上次聊到哪了？" },
+      { "role": "assistant", "content": "我们上次在聊摄影构图技巧。" }
+    ]
+    """));
+
+// 4c. 自定义系统提示词（普通对话 / 操控模式各一份）
+service.SetSystemPrompt("你是一个友好的摄影顾问。", "你是能操控 Windows 的 AI 助手。");
+
+// ============================================================
+// 5. 发送消息与接收回答
+// ============================================================
+// 5a. 显式指定角色：MiyaBonsai 会额外做 Miya 风格转换（懒加载启动 Qwen2.5-0.5B）
+string answer = await service.SendMessageAsync("你好呀", LlamaChatService.ChatRole.MiyaBonsai);
+Console.WriteLine($"回答: {answer}");
+
+// 5b. 角色模板直接回复（问候/身份询问/自我介绍/个人偏好，不走 AI）
+string? template = service.GetTemplateReply("你是谁", LlamaChatService.ChatRole.Ewin);
+if (template != null)
+    Console.WriteLine($"模板: {template}");
+
+// 5c. 热切换模型（会重启对应端口的 llama-server）
+await service.SwitchModeAsync(ModelMode.Quality);
+
+// 5d. 交互循环：按 SelectedRole（默认 MiyaBonsai）自动决定是否风格转换
+while (true)
+{
+    Console.Write("用户: ");
+    string? input = Console.ReadLine();
+    if (string.IsNullOrEmpty(input)) continue;
+    if (input == "exit") break;
+
+    string reply = await service.SendMessageAsync(input);   // 返回值方式接收
+    Console.WriteLine($"助手: {reply}");
+}
+
+// ============================================================
+// 6. 退出（自动清理 llama-server / MCP 进程）
+// ============================================================
+await service.DisposeAsync();
+```
 
 ## 🧠 核心实现要点
 

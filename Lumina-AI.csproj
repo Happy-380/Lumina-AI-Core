@@ -1,11 +1,15 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<OutputType>Exe</OutputType>
+		<!-- 双模式构建：默认 Exe（控制台应用）；-p:BuildAsLibrary=true 时打包为类库 -->
+		<OutputType Condition="'$(BuildAsLibrary)' != 'true'">Exe</OutputType>
+		<OutputType Condition="'$(BuildAsLibrary)' == 'true'">Library</OutputType>
 		<TargetFramework>net8.0</TargetFramework>
 		<RootNamespace>Lumina_AI</RootNamespace>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
+		<!-- 类库模式：排除控制台入口 Program.Main -->
+		<DefineConstants Condition="'$(BuildAsLibrary)' == 'true'">$(DefineConstants);LIBRARY_MODE</DefineConstants>
 	</PropertyGroup>
 
 	<ItemGroup>

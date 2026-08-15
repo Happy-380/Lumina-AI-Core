@@ -103,14 +103,6 @@ namespace LlamaChat
 
         public const string LlamaFolderName = "llama";
 
-        // 模型配置：三种模式
-        public enum ModelMode
-        {
-            Fast,      // 1.7B
-            Balanced,  // 4B
-            Quality    // 8B
-        }
-
         // 模型文件名映射
         public static readonly IReadOnlyDictionary<ModelMode, string> ModelFiles = new Dictionary<ModelMode, string>
         {
@@ -161,16 +153,26 @@ namespace LlamaChat
         private bool _isDisposed;
 
         // 当前模式
-        private AppConfig.ModelMode _currentMode;
+        private ModelMode _currentMode;
 
-        // 语言风格转换服务（Miya）
-        private StyleTransferService _styleTransfer;
+        // 可调配置（语言风格转换相关除外）
+        private readonly LuminaOptions _options;
+
+        // 语言风格转换服务（Miya）：懒加载，仅在需要转换时创建并启动服务器
+        private StyleTransferService? _styleTransfer;
+
+        // 自定义系统提示词（null = 使用默认）
+        private string? _customSystemPrompt;
+        private string? _customControlSystemPrompt;
 
         // 角色身份模板服务（问候/身份/自我介绍/个人偏好，不走 AI）
         private readonly CharacterIdentityService _identity = new();
 
         // 当前选择的角色（上下文不记录角色，仅用于决定是否风格转换）
         public ChatRole SelectedRole { get; set; } = ChatRole.MiyaBonsai;
+
+        // 完成一轮对话后触发：(用户输入, 回答)
+        public event Action<string, string>? AnswerReceived;
 
         // +MCP: 相关字段
         private McpClient _mcpClient;
@@ -185,17 +187,16 @@ namespace LlamaChat
 
         public JArray CurrentHistory => _context?.GetMessagesForRequest();
 
-        // 构造函数：指定初始模式
-        public LlamaChatService(AppConfig.ModelMode initialMode = AppConfig.ModelMode.Balanced, int? manualContextSize = null)
+        // 构造函数：仅初始化内存态，不启动任何进程（需调用 InitializeAsync）
+        public LlamaChatService(LuminaOptions? options = null)
         {
+            _options = options ?? new LuminaOptions();
             _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
-            _currentMode = initialMode;
+            _currentMode = _options.InitialMode;
 
             // 计算上下文大小（与模型无关）
-            if (manualContextSize.HasValue && manualContextSize.Value > 0)
-                _contextSize = manualContextSize.Value;
-            else if (AppConfig.ManualContextSize > 0)
-                _contextSize = AppConfig.ManualContextSize;
+            if (_options.ManualContextSize.HasValue && _options.ManualContextSize.Value > 0)
+                _contextSize = _options.ManualContextSize.Value;
             else
             {
                 double avPhysGB = GetAvailablePhysicalMemoryGB();
@@ -204,36 +205,95 @@ namespace LlamaChat
                 double kvCacheBudgetGB = Math.Max(0, maxAllocGB - modelOverheadGB);
                 _contextSize = (int)(kvCacheBudgetGB * 1024 / 0.286);
                 _contextSize = Math.Min(Math.Max(_contextSize, 10240), 32768);
-                ConsoleHelper.Info($"系统可用内存 {avPhysGB:F2} GB → 自动计算上下文: {_contextSize}");
+                Log(LogLevel.Info, $"系统可用内存 {avPhysGB:F2} GB → 自动计算上下文: {_contextSize}");
             }
 
             _context = new ConversationContext(
                 maxContextTokens: _contextSize,
-                maxResponseTokens: AppConfig.MaxResponseTokens,
-                reserveTokens: AppConfig.ReserveTokens,
-                charPerToken: AppConfig.CharPerToken
+                maxResponseTokens: _options.MaxResponseTokens,
+                reserveTokens: _options.ReserveTokens,
+                charPerToken: _options.CharPerToken
             );
             _cache = new SemanticCache(
-                similarityThreshold: AppConfig.SimilarityThreshold,
-                maxEntries: AppConfig.MaxCacheEntries
+                similarityThreshold: _options.SimilarityThreshold,
+                maxEntries: _options.MaxCacheEntries
             );
-            _retriever = new HistoryRetriever(topK: AppConfig.HistoryRetrievalTopK);
-
-            // 启动对应模式的 llama-server
-            StartServerForMode(_currentMode);
-
-            // +MCP: 初始化 MCP
-            InitializeMcpAsync().GetAwaiter().GetResult();
-
-            // 语言风格转换服务（Miya）：懒加载，仅在需要转换时启动服务器
-            _styleTransfer = new StyleTransferService();
+            _retriever = new HistoryRetriever(topK: _options.HistoryRetrievalTopK);
         }
 
-        // ---- 将一段文本转换为 Miya 风格（自动检测语言） ----
+        // 兼容旧签名（向后兼容）
+        public LlamaChatService(ModelMode initialMode, int? manualContextSize = null)
+            : this(new LuminaOptions { InitialMode = initialMode, ManualContextSize = manualContextSize })
+        {
+        }
+
+        // ---- 启动 llama-server 与 MCP（库模式建议显式调用） ----
+        public async Task InitializeAsync()
+        {
+            StartServerForMode(_currentMode);
+            await InitializeMcpAsync();
+        }
+
+        // ---- 日志（经 LogCallback 输出，UI 无关；未设置回调时不输出） ----
+        private void Log(LogLevel level, string message)
+        {
+            _options.LogCallback?.Invoke(level, message);
+        }
+
+        // ---- 用户确认（经 ConfirmCallback，UI 无关；未设置回调时默认拒绝，安全） ----
+        private Task<bool> ConfirmAsync(string prompt)
+        {
+            return _options.ConfirmCallback == null
+                ? Task.FromResult(false)
+                : _options.ConfirmCallback(prompt);
+        }
+
+        // ---- 将一段文本转换为 Miya 风格（自动检测语言；服务器懒加载） ----
         public async Task<string> ConvertStyleAsync(string text)
         {
             if (string.IsNullOrWhiteSpace(text)) return text;
+            _styleTransfer ??= new StyleTransferService();
             return await _styleTransfer.ConvertMarkdownAsync(text);
+        }
+
+        // ---- 设置自定义系统提示词（传 null 恢复内置默认） ----
+        public void SetSystemPrompt(string? systemPrompt, string? controlSystemPrompt = null)
+        {
+            _customSystemPrompt = systemPrompt;
+            _customControlSystemPrompt = controlSystemPrompt;
+        }
+
+        // ---- 从外部导入单条上下文消息（同时写入检索索引） ----
+        public void AddContextMessage(string role, string content)
+        {
+            if (string.IsNullOrEmpty(role) || content == null) return;
+            _context.AddMessage(role, content);
+            _retriever.AddMessage(role, content);
+        }
+
+        // ---- 发送消息（按 SelectedRole 自动决定是否做 Miya 风格转换） ----
+        public async Task<string> SendMessageAsync(string userInput)
+        {
+            var post = SelectedRole == ChatRole.MiyaBonsai
+                ? (Func<string, Task<string>>)(text => ConvertStyleAsync(text))
+                : null;
+            return await SendMessageAsync(userInput, post);
+        }
+
+        // ---- 发送消息（显式指定角色；同时更新 SelectedRole） ----
+        public async Task<string> SendMessageAsync(string userInput, ChatRole role)
+        {
+            SelectedRole = role;
+            return await SendMessageAsync(userInput);
+        }
+
+        // ---- 尝试用角色模板直接回复；命中时自动记录上下文并触发 AnswerReceived ----
+        public string? GetTemplateReply(string userInput, ChatRole role)
+        {
+            string? reply = TryGetTemplateReply(userInput, role);
+            if (reply != null)
+                RecordTemplateReply(userInput, reply);
+            return reply;
         }
 
         // ---- 角色 -> 模板角色名（埃文/米娅） ----
@@ -263,26 +323,34 @@ namespace LlamaChat
         {
             _context.AddMessage("user", userInput);
             _context.AddMessage("assistant", reply);
+            AnswerReceived?.Invoke(userInput, reply);
         }
 
+        // ---- 模型文件 / 端口解析（优先 options，缺省回退 AppConfig 默认） ----
+        private string GetModelFile(ModelMode mode)
+            => _options.ModelFiles != null && _options.ModelFiles.TryGetValue(mode, out var f) ? f : AppConfig.ModelFiles[mode];
+
+        private int GetModelPort(ModelMode mode)
+            => _options.ModelPorts != null && _options.ModelPorts.TryGetValue(mode, out var p) ? p : AppConfig.ModelPorts[mode];
+
         // ---- 根据模式启动服务器 ----
-        private void StartServerForMode(AppConfig.ModelMode mode)
+        private void StartServerForMode(ModelMode mode)
         {
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string llamaDir = Path.Combine(baseDir, AppConfig.LlamaFolderName);
+            string llamaDir = Path.Combine(baseDir, _options.LlamaFolderName);
             string serverExe = Path.Combine(llamaDir, "llama-server.exe");
-            string modelFile = AppConfig.ModelFiles[mode];
+            string modelFile = GetModelFile(mode);
             string modelPath = Path.Combine(llamaDir, modelFile);
-            int port = AppConfig.ModelPorts[mode];
+            int port = GetModelPort(mode);
 
             if (!File.Exists(serverExe))
             {
-                ConsoleHelper.Error($"未找到 llama-server.exe: {serverExe}");
+                Log(LogLevel.Error, $"未找到 llama-server.exe: {serverExe}");
                 throw new FileNotFoundException($"未找到 {serverExe}");
             }
             if (!File.Exists(modelPath))
             {
-                ConsoleHelper.Error($"未找到模型文件: {modelPath}");
+                Log(LogLevel.Error, $"未找到模型文件: {modelPath}");
                 throw new FileNotFoundException($"未找到模型文件 {modelPath}");
             }
 
@@ -310,14 +378,14 @@ namespace LlamaChat
             _serverProcess.BeginOutputReadLine();
             _serverProcess.BeginErrorReadLine();
 
-            ConsoleHelper.Prompt($"正在启动 llama-server (模式: {mode}, 端口: {port})...");
+            Log(LogLevel.Prompt, $"正在启动 llama-server (模式: {mode}, 端口: {port})...");
             bool ready = WaitForServerAsync(port).GetAwaiter().GetResult();
             if (!ready)
             {
-                ConsoleHelper.Error($"llama-server (端口 {port}) 启动超时。");
+                Log(LogLevel.Error, $"llama-server (端口 {port}) 启动超时。");
                 throw new TimeoutException($"llama-server 启动超时 (端口 {port})。");
             }
-            ConsoleHelper.Success($"llama-server 已就绪！(模式: {mode}, 端口: {port})");
+            Log(LogLevel.Success, $"llama-server 已就绪！(模式: {mode}, 端口: {port})");
         }
 
         // 等待服务器就绪（指定端口）
@@ -356,12 +424,12 @@ namespace LlamaChat
             KillAllLlamaServers();
         }
 
-        // ---- 静态方法：杀死所有 llama-server 进程 ----
-        private static void KillAllLlamaServers()
+        // ---- 杀死所有 llama-server 进程 ----
+        private void KillAllLlamaServers()
         {
             var processes = Process.GetProcessesByName("llama-server");
             if (processes.Length == 0) return;
-            ConsoleHelper.Warning($"发现 {processes.Length} 个残留 llama-server 进程，正在终止...");
+            Log(LogLevel.Warning, $"发现 {processes.Length} 个残留 llama-server 进程，正在终止...");
             foreach (var p in processes)
             {
                 try
@@ -372,19 +440,19 @@ namespace LlamaChat
                 }
                 catch { }
             }
-            ConsoleHelper.Success("已清理所有 llama-server 进程。");
+            Log(LogLevel.Success, "已清理所有 llama-server 进程。");
         }
 
         // ---- 切换模型模式（异步） ----
-        public async Task SwitchModeAsync(AppConfig.ModelMode newMode)
+        public async Task SwitchModeAsync(ModelMode newMode)
         {
             if (newMode == _currentMode)
             {
-                ConsoleHelper.Info($"当前已经是 {newMode} 模式，无需切换。");
+                Log(LogLevel.Info, $"当前已经是 {newMode} 模式，无需切换。");
                 return;
             }
 
-            ConsoleHelper.Prompt($"正在从 {_currentMode} 切换至 {newMode} ...");
+            Log(LogLevel.Prompt, $"正在从 {_currentMode} 切换至 {newMode} ...");
             StopCurrentServer();        // 杀死当前及残留进程
             _currentMode = newMode;
             StartServerForMode(newMode); // 启动新服务器
@@ -392,10 +460,10 @@ namespace LlamaChat
         }
 
         // ---- 获取当前模式 ----
-        public AppConfig.ModelMode CurrentMode => _currentMode;
+        public ModelMode CurrentMode => _currentMode;
 
         // ---- 获取端口 ----
-        public int CurrentPort => AppConfig.ModelPorts[_currentMode];
+        public int CurrentPort => GetModelPort(_currentMode);
 
         // +MCP: 初始化 MCP 客户端
         private async Task InitializeMcpAsync()
@@ -404,12 +472,12 @@ namespace LlamaChat
             {
                 string mcpExe = Path.Combine(
                     AppDomain.CurrentDomain.BaseDirectory,
-                    AppConfig.McpFolderName,
-                    AppConfig.McpExeName
+                    _options.McpFolderName,
+                    _options.McpExeName
                 );
                 if (!File.Exists(mcpExe))
                 {
-                    ConsoleHelper.Error($"未找到 WindowsMcp.exe: {mcpExe}");
+                    Log(LogLevel.Error, $"未找到 WindowsMcp.exe: {mcpExe}");
                     _isMcpReady = false;
                     return;
                 }
@@ -424,11 +492,11 @@ namespace LlamaChat
                 var toolsResult = await _mcpClient.ListToolsAsync();
                 _mcpTools = toolsResult.ToList();
                 _isMcpReady = true;
-                ConsoleHelper.Success($"MCP 已就绪，加载了 {_mcpTools.Count} 个工具");
+                Log(LogLevel.Success, $"MCP 已就绪，加载了 {_mcpTools.Count} 个工具");
             }
             catch (Exception ex)
             {
-                ConsoleHelper.Error($"MCP 初始化失败: {ex.Message}");
+                Log(LogLevel.Error, $"MCP 初始化失败: {ex.Message}");
                 _isMcpReady = false;
             }
         }
@@ -487,7 +555,7 @@ namespace LlamaChat
                     count++;
                 }
             }
-            ConsoleHelper.Success($"已导入 {count} 条历史消息。");
+            Log(LogLevel.Success, $"已导入 {count} 条历史消息。");
         }
 
         public void ImportHistoryFromFile(string filePath)
@@ -495,7 +563,7 @@ namespace LlamaChat
             if (string.IsNullOrEmpty(filePath)) throw new ArgumentNullException(nameof(filePath));
             if (!File.Exists(filePath))
             {
-                ConsoleHelper.Warning($"历史文件不存在: {filePath}");
+                Log(LogLevel.Warning, $"历史文件不存在: {filePath}");
                 throw new FileNotFoundException("历史文件不存在", filePath);
             }
             string json = File.ReadAllText(filePath);
@@ -507,7 +575,7 @@ namespace LlamaChat
         {
             _context.Clear();
             _retriever.Clear();
-            ConsoleHelper.Prompt("对话历史已清除（包含检索索引）。");
+            Log(LogLevel.Prompt, "对话历史已清除（包含检索索引）。");
         }
 
         public string GetCacheStats() => _cache.GetStats();
@@ -518,16 +586,17 @@ namespace LlamaChat
             if (string.IsNullOrEmpty(userInput)) return string.Empty;
 
             // 1. 语义缓存
-            if (AppConfig.EnableSemanticCache)
+            if (_options.EnableSemanticCache)
             {
                 string cached = _cache.GetCachedAnswer(userInput);
                 if (cached != null)
                 {
-                    ConsoleHelper.Info("⚡ 缓存命中，直接返回。");
+                    Log(LogLevel.Info, "⚡ 缓存命中，直接返回。");
                     _context.AddMessage("user", userInput);
                     _context.AddMessage("assistant", cached);
                     _retriever.AddMessage("user", userInput);
                     _retriever.AddMessage("assistant", cached);
+                    AnswerReceived?.Invoke(userInput, cached);
                     return cached;
                 }
             }
@@ -545,65 +614,55 @@ namespace LlamaChat
                 .ToList();
 
             if (relevantHistories.Any())
-                ConsoleHelper.Info($"检索到 {relevantHistories.Count} 条相关历史记录（已排除最近对话）。");
+                Log(LogLevel.Info, $"检索到 {relevantHistories.Count} 条相关历史记录（已排除最近对话）。");
             else
-                ConsoleHelper.Info("未检索到相关历史记录。");
+                Log(LogLevel.Info, "未检索到相关历史记录。");
 
-            // 用户交互：是否允许操控
+            // 用户交互：是否允许操控（经 ConfirmCallback，默认拒绝）
             bool allowControl = false;
             if (_isMcpReady)
             {
-                ConsoleHelper.Warning("是否允许 AI 操控电脑？(y/n)");
-                var key = Program.SafeReadKey();
-                Console.WriteLine();
-                if (key.KeyChar == 'y' || key.KeyChar == 'Y')
-                {
-                    allowControl = true;
-                    ConsoleHelper.Success("已允许 AI 操控电脑。");
-                }
-                else
-                {
-                    ConsoleHelper.Info("已禁止 AI 操控电脑，本次只进行普通对话。");
-                }
+                allowControl = await ConfirmAsync("是否允许 AI 操控电脑？");
+                Log(LogLevel.Info, allowControl ? "已允许 AI 操控电脑。" : "已禁止 AI 操控电脑，本次只进行普通对话。");
             }
             else
             {
-                ConsoleHelper.Info("MCP 未就绪，无法操控电脑。");
+                Log(LogLevel.Info, "MCP 未就绪，无法操控电脑。");
             }
 
             // 4. 判断是否与最近 N 轮相关（决定是否携带滑动窗口）
             bool useWindowContext = true;
-            int checkRounds = AppConfig.RelevanceCheckRounds;
+            int checkRounds = _options.RelevanceCheckRounds;
             if (checkRounds > 0)
             {
                 var lastUserMessages = _context.GetLastUserMessages(checkRounds);
                 if (lastUserMessages.Any())
                 {
                     double maxSim = lastUserMessages.Max(prev => SemanticCache.ComputeSimilarity(prev, userInput));
-                    if (maxSim < AppConfig.RelevanceThreshold)
+                    if (maxSim < _options.RelevanceThreshold)
                     {
                         useWindowContext = false;
-                        ConsoleHelper.Info($"与最近 {checkRounds} 轮不相关（最大相似度 {maxSim:F2} < {AppConfig.RelevanceThreshold}），将不带最近对话上下文，但保留检索到的背景。");
+                        Log(LogLevel.Info, $"与最近 {checkRounds} 轮不相关（最大相似度 {maxSim:F2} < {_options.RelevanceThreshold}），将不带最近对话上下文，但保留检索到的背景。");
                     }
                     else
                     {
-                        ConsoleHelper.Info($"与最近对话相关（最大相似度 {maxSim:F2} >= {AppConfig.RelevanceThreshold}），将携带滑动窗口。");
+                        Log(LogLevel.Info, $"与最近对话相关（最大相似度 {maxSim:F2} >= {_options.RelevanceThreshold}），将携带滑动窗口。");
                     }
                 }
                 else
                 {
                     useWindowContext = false;
-                    ConsoleHelper.Info("尚无历史消息，将不带最近对话上下文。");
+                    Log(LogLevel.Info, "尚无历史消息，将不带最近对话上下文。");
                 }
             }
 
             // 5. 构建消息列表
             var messages = new JArray();
 
-            // 5.1 系统提示
+            // 5.1 系统提示（支持宿主通过 SetSystemPrompt / LuminaOptions 自定义）
             string systemPrompt = allowControl
-                ? @"你是一个能操控 Windows 的 AI 助手。如果用户想操控电脑（如打开程序、移动鼠标、读写文件、上网购物等），你必须使用提供的工具来完成，不要用文字描述如何操作。如果用户只是普通聊天或提问，则直接回答。"
-                : @"你是一个叫做Lumina的AI助手，你的职责是与用户进行自然语言对话。";
+                ? (_customControlSystemPrompt ?? _options.ControlSystemPrompt ?? @"你是一个能操控 Windows 的 AI 助手。如果用户想操控电脑（如打开程序、移动鼠标、读写文件、上网购物等），你必须使用提供的工具来完成，不要用文字描述如何操作。如果用户只是普通聊天或提问，则直接回答。")
+                : (_customSystemPrompt ?? _options.SystemPrompt ?? @"你是一个叫做Lumina的AI助手，你的职责是与用户进行自然语言对话。");
             messages.Add(new JObject { ["role"] = "system", ["content"] = systemPrompt });
 
             // 5.2 检索到的相关历史（始终添加）
@@ -635,7 +694,7 @@ namespace LlamaChat
             });
 
             // 6. 工具调用循环
-            int maxIterations = 10;
+            int maxIterations = _options.MaxToolCallIterations;
             int operationCount = 0;
             bool isFirstToolCall = true;
             bool isControlMode = false;
@@ -647,7 +706,7 @@ namespace LlamaChat
                 {
                     ["messages"] = messages,
                     ["temperature"] = 0.7,
-                    ["max_tokens"] = AppConfig.MaxResponseTokens,
+                    ["max_tokens"] = _options.MaxResponseTokens,
                     ["stream"] = false
                 };
 
@@ -656,9 +715,9 @@ namespace LlamaChat
                     requestBody["tools"] = BuildToolsJson();
                 }
 
-                ConsoleHelper.Info("========== 请求（发送给模型） ==========");
-                ConsoleHelper.Info(requestBody.ToString(Formatting.Indented));
-                ConsoleHelper.Info("==========================================");
+                Log(LogLevel.Info, "========== 请求（发送给模型） ==========");
+                Log(LogLevel.Info, requestBody.ToString(Formatting.Indented));
+                Log(LogLevel.Info, "==========================================");
 
                 JObject response;
                 try
@@ -667,46 +726,51 @@ namespace LlamaChat
                 }
                 catch (Exception ex)
                 {
-                    ConsoleHelper.Error($"调用模型失败: {ex.Message}");
-                    return $"错误: {ex.Message}";
+                    Log(LogLevel.Error, $"调用模型失败: {ex.Message}");
+                    string errMsg = $"错误: {ex.Message}";
+                    AnswerReceived?.Invoke(userInput, errMsg);
+                    return errMsg;
                 }
 
                 var choice = response["choices"]?[0];
                 if (choice == null)
                 {
-                    ConsoleHelper.Error("模型返回异常：无 choices");
-                    return "模型返回异常。";
+                    Log(LogLevel.Error, "模型返回异常：无 choices");
+                    string errMsg = "模型返回异常。";
+                    AnswerReceived?.Invoke(userInput, errMsg);
+                    return errMsg;
                 }
                 var message = choice["message"];
                 var content = message["content"]?.ToString() ?? "";
                 var toolCalls = message["tool_calls"] as JArray;
 
-                ConsoleHelper.Info("========== 响应（来自模型） ==========");
-                ConsoleHelper.Info(response.ToString(Formatting.Indented));
-                ConsoleHelper.Info("=======================================");
+                Log(LogLevel.Info, "========== 响应（来自模型） ==========");
+                Log(LogLevel.Info, response.ToString(Formatting.Indented));
+                Log(LogLevel.Info, "=======================================");
 
                 if (toolCalls != null && toolCalls.Count > 0)
                 {
                     if (!allowControl)
                     {
-                        ConsoleHelper.Warning("模型请求了工具调用，但用户未允许操控。已忽略工具调用，请重新输入。");
-                        return "AI 尝试使用工具但被拒绝。";
+                        Log(LogLevel.Warning, "模型请求了工具调用，但用户未允许操控。已忽略工具调用，请重新输入。");
+                        string deniedMsg = "AI 尝试使用工具但被拒绝。";
+                        AnswerReceived?.Invoke(userInput, deniedMsg);
+                        return deniedMsg;
                     }
 
                     isControlMode = true;
 
                     if (isFirstToolCall)
                     {
-                        ConsoleHelper.Warning("即将执行电脑操控操作，是否继续？(y/n)");
-                        var key = Program.SafeReadKey();
-                        Console.WriteLine();
-                        if (key.KeyChar != 'y' && key.KeyChar != 'Y')
+                        bool ok = await ConfirmAsync("即将执行电脑操控操作，是否继续？");
+                        if (!ok)
                         {
-                            ConsoleHelper.Info("用户取消了操作。");
+                            Log(LogLevel.Info, "用户取消了操作。");
                             userCancelled = true;
                             string cancelMsg = "用户取消了操作。";
                             _context.AddMessage("user", userInput);
                             _context.AddMessage("assistant", cancelMsg);
+                            AnswerReceived?.Invoke(userInput, cancelMsg);
                             return cancelMsg;
                         }
                         isFirstToolCall = false;
@@ -723,10 +787,8 @@ namespace LlamaChat
 
                         if (_dangerousTools.Contains(toolName))
                         {
-                            ConsoleHelper.Warning($"即将执行危险操作：{toolName}，参数：{argsJson}，是否继续？(y/n)");
-                            var key = Program.SafeReadKey();
-                            Console.WriteLine();
-                            if (key.KeyChar != 'y' && key.KeyChar != 'Y')
+                            bool ok = await ConfirmAsync($"即将执行危险操作：{toolName}，参数：{argsJson}，是否继续？");
+                            if (!ok)
                             {
                                 var failResult = new JObject
                                 {
@@ -739,7 +801,7 @@ namespace LlamaChat
                             }
                         }
 
-                        ConsoleHelper.Success($"正在执行：{toolName}，参数：{argsJson}");
+                        Log(LogLevel.Success, $"正在执行：{toolName}，参数：{argsJson}");
 
                         try
                         {
@@ -755,7 +817,7 @@ namespace LlamaChat
                             {
                                 resultContent = toolResult.Content?.ToString() ?? "执行成功";
                             }
-                            ConsoleHelper.Info($"执行结果：{resultContent}");
+                            Log(LogLevel.Info, $"执行结果：{resultContent}");
                             operationCount++;
 
                             toolResultMessages.Add(new JObject
@@ -767,7 +829,7 @@ namespace LlamaChat
                         }
                         catch (Exception ex)
                         {
-                            ConsoleHelper.Error($"执行 {toolName} 失败：{ex.Message}");
+                            Log(LogLevel.Error, $"执行 {toolName} 失败：{ex.Message}");
                             toolResultMessages.Add(new JObject
                             {
                                 ["role"] = "tool",
@@ -795,6 +857,7 @@ namespace LlamaChat
                         finalMsg = "未执行任何操作，任务可能失败。";
                     _context.AddMessage("user", userInput);
                     _context.AddMessage("assistant", finalMsg);
+                    AnswerReceived?.Invoke(userInput, finalMsg);
                     return finalMsg;
                 }
                 else
@@ -804,8 +867,9 @@ namespace LlamaChat
                     if (postProcess != null) final = await postProcess(content);
                     _context.AddMessage("user", userInput);
                     _context.AddMessage("assistant", final);
-                    if (AppConfig.EnableSemanticCache)
+                    if (_options.EnableSemanticCache)
                         _cache.AddEntry(userInput, final);
+                    AnswerReceived?.Invoke(userInput, final);
                     return final;
                 }
             }
@@ -834,18 +898,18 @@ namespace LlamaChat
                 var completed = await Task.WhenAny(disposeTask, Task.Delay(5000));
                 if (completed != disposeTask)
                 {
-                    ConsoleHelper.Warning("MCP 客户端释放超时（子进程可能未响应），已跳过。");
+                    Log(LogLevel.Warning, "MCP 客户端释放超时（子进程可能未响应），已跳过。");
                     // 若 disposeTask 仍在运行（后台），等待一小段时间后强制终止进程，避免退出挂起
                     var finish = await Task.WhenAny(disposeTask, Task.Delay(3000));
-                    ConsoleHelper.Warning($"MCP 释放任务状态: {(disposeTask.IsCompleted ? "完成" : disposeTask.Status)} ");
+                    Log(LogLevel.Warning, $"MCP 释放任务状态: {(disposeTask.IsCompleted ? "完成" : disposeTask.Status)} ");
                     if (finish != disposeTask)
                     {
-                        ConsoleHelper.Warning("MCP 释放任务仍挂起，强制退出。");
-                        Environment.Exit(0);
+                        // 库模式下不再强制 Environment.Exit（会杀死宿主进程），仅记录并跳过
+                        Log(LogLevel.Warning, "MCP 释放任务仍挂起，跳过等待。");
                     }
                 }
             }
-            ConsoleHelper.Warning("DisposeAsync 完成");
+            Log(LogLevel.Warning, "DisposeAsync 完成");
         }
 
         // ---- Windows 内存查询 ----
@@ -1228,8 +1292,9 @@ namespace LlamaChat
         }
     }
 
+#if !LIBRARY_MODE
     // ===================================================================
-    // 控制台入口（支持模式切换命令）
+    // 控制台入口（仅控制台应用模式编译；类库模式 -p:BuildAsLibrary=true 时排除）
     // ===================================================================
     class Program
     {
@@ -1247,19 +1312,21 @@ namespace LlamaChat
         {
             Console.OutputEncoding = Encoding.UTF8;
 
-            // 初始模式（可从命令行参数读取，或默认平衡）
-            var initialMode = AppConfig.DefaultMode;
+            // 从命令行参数构建可调配置（LuminaOptions）
+            var options = new LuminaOptions();
+
+            // 初始模式（--mode）
             for (int i = 0; i < args.Length; i++)
             {
                 if (args[i] == "--mode" && i + 1 < args.Length)
                 {
-                    if (Enum.TryParse<AppConfig.ModelMode>(args[i + 1], true, out var mode))
-                        initialMode = mode;
+                    if (Enum.TryParse<ModelMode>(args[i + 1], true, out var mode))
+                        options.InitialMode = mode;
                     break;
                 }
             }
 
-            // 历史文件参数
+            // 历史文件参数（--history）
             string historyFilePath = null;
             for (int i = 0; i < args.Length; i++)
             {
@@ -1270,6 +1337,28 @@ namespace LlamaChat
                 }
             }
 
+            // 注入控制台交互回调（库模式下由宿主自行实现）
+            options.ConfirmCallback = prompt =>
+            {
+                Console.WriteLine();
+                ConsoleHelper.Warning($"{prompt} (y/n)");
+                var key = SafeReadKey();
+                Console.WriteLine();
+                return Task.FromResult(key.KeyChar == 'y' || key.KeyChar == 'Y');
+            };
+            options.LogCallback = (level, message) =>
+            {
+                switch (level)
+                {
+                    case LogLevel.Info: ConsoleHelper.Info(message); break;
+                    case LogLevel.Warning: ConsoleHelper.Warning(message); break;
+                    case LogLevel.Success: ConsoleHelper.Success(message); break;
+                    case LogLevel.Error: ConsoleHelper.Error(message); break;
+                    case LogLevel.Prompt: ConsoleHelper.Prompt(message); break;
+                    default: ConsoleHelper.Info(message); break;
+                }
+            };
+
             // 注意：不要注册 ProcessExit -> Environment.Exit 的处理器（Environment.Exit 会再次触发 ProcessExit，导致挂起）
             Console.CancelKeyPress += (s, e) =>
             {
@@ -1277,8 +1366,9 @@ namespace LlamaChat
                 Environment.Exit(0);
             };
 
-            // 创建服务
-            await using var service = new LlamaChatService(initialMode);
+            // 创建服务（仅内存态）并启动 llama-server / MCP
+            await using var service = new LlamaChatService(options);
+            await service.InitializeAsync();
 
             // 导入历史
             if (!string.IsNullOrEmpty(historyFilePath))
@@ -1315,7 +1405,7 @@ namespace LlamaChat
                     var parts = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                     if (parts.Length == 2)
                     {
-                        if (Enum.TryParse<AppConfig.ModelMode>(parts[1], true, out var newMode))
+                        if (Enum.TryParse<ModelMode>(parts[1], true, out var newMode))
                         {
                             try
                             {
@@ -1352,22 +1442,16 @@ namespace LlamaChat
                     ConsoleHelper.Success($"已选择角色: {role}");
 
                     // 角色模板直接回复（问候/身份询问/自我介绍/个人偏好）—— 不走任何 AI 路径
-                    string templateReply = service.TryGetTemplateReply(input, role);
+                    string templateReply = service.GetTemplateReply(input, role);
                     if (templateReply != null)
                     {
-                        // 模板回复也按现有规则记录上下文（user/assistant，不记录角色）
-                        service.RecordTemplateReply(input, templateReply);
                         ConsoleHelper.UserContent($"助手: {templateReply}");
                         Console.WriteLine();
                         continue;
                     }
 
-                    // 仅 Miya-Bonsai 时做语言风格转换；Ewin 直接输出
-                    Func<string, Task<string>>? post = null;
-                    if (role == LlamaChatService.ChatRole.MiyaBonsai)
-                        post = text => service.ConvertStyleAsync(text);
-
-                    string reply = await service.SendMessageAsync(input, post);
+                    // 发送消息（SendMessageAsync 内部自动按角色决定是否做 Miya 风格转换）
+                    string reply = await service.SendMessageAsync(input, role);
                     ConsoleHelper.UserContent($"助手: {reply}");
                 }
                 catch (Exception ex)
@@ -1385,4 +1469,5 @@ namespace LlamaChat
             Environment.Exit(0);
         }
     }
+#endif
 }
