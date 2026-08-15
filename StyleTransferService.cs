@@ -61,13 +61,17 @@ namespace LlamaChat
         private readonly HttpClient _http;
         private bool _serverReady = false;
 
+        // 界面语言（仅用于启动消息；Auto = 跟随系统）
+        private readonly AppLanguage _language;
+
         // ---- token 预热缓存 ----
         private HashSet<int> _stopwordTokenIds = new();
         private HashSet<int> _punctTokenIds = new();
         private HashSet<int> _sentencePunctTokenIds = new();
 
-        public StyleTransferService()
+        public StyleTransferService(AppLanguage language = AppLanguage.Auto)
         {
+            _language = language;
             _http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
             EnsureServer();
             WarmupAsync().GetAwaiter().GetResult();
@@ -97,9 +101,9 @@ namespace LlamaChat
             string modelPath = Path.Combine(llamaDir, ModelFile);
 
             if (!File.Exists(serverExe))
-                throw new FileNotFoundException($"未找到 {serverExe}");
+                throw new FileNotFoundException(I18n.T(_language, "未找到 {0}", "Not found: {0}", serverExe));
             if (!File.Exists(modelPath))
-                throw new FileNotFoundException($"未找到风格转换模型 {modelPath}");
+                throw new FileNotFoundException(I18n.T(_language, "未找到风格转换模型 {0}", "Style-transfer model not found: {0}", modelPath));
 
             int threads = Environment.ProcessorCount;
             string args = $"-m \"{modelPath}\" --host 127.0.0.1 --port {Port} -c {ContextSize} -t {threads}";
@@ -119,12 +123,12 @@ namespace LlamaChat
             _serverProcess.BeginOutputReadLine();
             _serverProcess.BeginErrorReadLine();
 
-            ConsoleHelper.Prompt($"正在启动风格转换 llama-server (端口 {Port})...");
+            ConsoleHelper.Prompt(I18n.T(_language, "正在启动风格转换 llama-server (端口 {0})...", "Starting style-transfer llama-server (port {0})...", Port));
             bool ready = WaitForServerAsync().GetAwaiter().GetResult();
             if (!ready)
-                throw new TimeoutException($"风格转换 llama-server (端口 {Port}) 启动超时。");
+                throw new TimeoutException(I18n.T(_language, "风格转换 llama-server (端口 {0}) 启动超时。", "Style-transfer llama-server (port {0}) startup timed out.", Port));
             _serverReady = true;
-            ConsoleHelper.Success($"风格转换 llama-server 已就绪！(端口 {Port})");
+            ConsoleHelper.Success(I18n.T(_language, "风格转换 llama-server 已就绪！(端口 {0})", "Style-transfer llama-server ready! (port {0})", Port));
         }
 
         private async Task<bool> WaitForServerAsync(int maxSeconds = 120)

@@ -38,6 +38,9 @@ namespace LlamaChat
         public ModelMode InitialMode { get; set; } = AppConfig.DefaultMode;
         public int? ManualContextSize { get; set; } = AppConfig.ManualContextSize > 0 ? AppConfig.ManualContextSize : null;
 
+        // ---- 语言（Auto = 跟随系统语言，仅支持中 / 英文） ----
+        public AppLanguage Language { get; set; } = AppLanguage.Auto;
+
         // ---- 生成参数 ----
         public int MaxResponseTokens { get; set; } = AppConfig.MaxResponseTokens;
         public int ReserveTokens { get; set; } = AppConfig.ReserveTokens;
