@@ -20,7 +20,7 @@
 ## 🚀 快速体验
 
 **只需三步：**
-1. 下载最新 [Release](https://github.com/Happy-380/Lumina-AI-Core/releases)中的`bin.zip.001`和`bin.zip.002`
+1. 下载最新 [Release](https://github.com/Happy-380/Lumina-AI-Core/releases) 中的 `bin.zip.001` 和 `bin.zip.002`
 2. 解压并双击 `Lumina-AI.exe`
 3. 在控制台输入你的问题
 
@@ -28,7 +28,7 @@
 
 ## 🛠️ 我想集成到自己的项目
 
-如果你是一名 .NET 开发者，可以按照wiki中的介绍编译并启动程序。
+如果你是一名 .NET 开发者，可以按照 wiki 中的介绍编译并启动程序。
 
 ---
 ## 🤝 贡献与反馈
