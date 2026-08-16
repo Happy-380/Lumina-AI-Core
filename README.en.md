@@ -7,6 +7,8 @@
 
 [简体中文](README.md) | **English**
 
+---
+
 ## ✨ What Makes It Cool?
 
 | Feature | Description |
