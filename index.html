@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lumina AI Core · 本地全能 AI 助手</title>
+    <!-- Google Font (Inter) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,600;14..32,700;14..32,800&display=swap" rel="stylesheet" />
+    <style>
+        /* ===== CSS Variables (Light / Dark) ===== */
+        :root {
+            --bg-body: #0b0d14;
+            --bg-card: rgba(255, 255, 255, 0.04);
+            --bg-card-hover: rgba(255, 255, 255, 0.07);
+            --bg-code: rgba(255, 255, 255, 0.06);
+            --bg-step: rgba(255, 255, 255, 0.03);
+            --bg-notice: rgba(251, 191, 36, 0.06);
+            --border-subtle: rgba(255, 255, 255, 0.06);
+            --border-notice: rgba(251, 191, 36, 0.40);
+            --text-primary: #eaeef5;
+            --text-secondary: rgba(255, 255, 255, 0.60);
+            --text-muted: rgba(255, 255, 255, 0.30);
+            --text-footer: rgba(255, 255, 255, 0.30);
+            --text-footer-link: rgba(255, 255, 255, 0.40);
+            --text-footer-link-hover: #fff;
+            --glow-1: radial-gradient(circle at 30% 40%, rgba(120, 80, 255, 0.15), transparent 70%);
+            --glow-2: radial-gradient(circle at 70% 60%, rgba(255, 140, 200, 0.10), transparent 70%);
+            --gradient-logo: linear-gradient(135deg, #c4b5fd, #a78bfa);
+            --gradient-hero: linear-gradient(135deg, #a78bfa, #f472b6);
+            --gradient-btn: linear-gradient(135deg, #8b5cf6, #7c3aed);
+            --shadow-btn: 0 8px 24px rgba(124, 58, 237, 0.30);
+            --shadow-btn-hover: 0 12px 32px rgba(124, 58, 237, 0.45);
+            --badge-bg: rgba(167, 139, 250, 0.15);
+            --badge-border: rgba(167, 139, 250, 0.15);
+            --badge-text: #a78bfa;
+            --tag-bg: rgba(167, 139, 250, 0.12);
+            --tag-text: #a78bfa;
+            --link-color: #a78bfa;
+            --link-hover: #c4b5fd;
+            --rotating-glow: #a78bfa;
+        }
+
+        [data-theme="light"] {
+            --bg-body: #f6f8fc;
+            --bg-card: rgba(0, 0, 0, 0.03);
+            --bg-card-hover: rgba(0, 0, 0, 0.05);
+            --bg-code: rgba(0, 0, 0, 0.05);
+            --bg-step: rgba(0, 0, 0, 0.02);
+            --bg-notice: rgba(251, 191, 36, 0.08);
+            --border-subtle: rgba(0, 0, 0, 0.08);
+            --border-notice: rgba(251, 191, 36, 0.50);
+            --text-primary: #1a1d27;
+            --text-secondary: rgba(0, 0, 0, 0.60);
+            --text-muted: rgba(0, 0, 0, 0.35);
+            --text-footer: rgba(0, 0, 0, 0.30);
+            --text-footer-link: rgba(0, 0, 0, 0.40);
+            --text-footer-link-hover: #1a1d27;
+            --glow-1: radial-gradient(circle at 30% 40%, rgba(120, 80, 255, 0.08), transparent 70%);
+            --glow-2: radial-gradient(circle at 70% 60%, rgba(255, 140, 200, 0.06), transparent 70%);
+            --gradient-logo: linear-gradient(135deg, #7c3aed, #6d28d9);
+            --gradient-hero: linear-gradient(135deg, #7c3aed, #db2777);
+            --gradient-btn: linear-gradient(135deg, #7c3aed, #6d28d9);
+            --shadow-btn: 0 8px 24px rgba(124, 58, 237, 0.25);
+            --shadow-btn-hover: 0 12px 32px rgba(124, 58, 237, 0.40);
+            --badge-bg: rgba(124, 58, 237, 0.10);
+            --badge-border: rgba(124, 58, 237, 0.15);
+            --badge-text: #6d28d9;
+            --tag-bg: rgba(124, 58, 237, 0.08);
+            --tag-text: #6d28d9;
+            --link-color: #6d28d9;
+            --link-hover: #5b21b6;
+            --rotating-glow: #6d28d9;
+        }
+
+        /* ===== Reset & Base ===== */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-body);
+            color: var(--text-primary);
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+            transition: background 0.35s ease, color 0.35s ease;
+        }
+
+        .bg-glow {
+            position: fixed;
+            top: -30%;
+            left: -20%;
+            width: 80%;
+            height: 80%;
+            background: var(--glow-1);
+            pointer-events: none;
+            z-index: 0;
+            transition: background 0.35s ease;
+        }
+        .bg-glow-2 {
+            position: fixed;
+            bottom: -20%;
+            right: -10%;
+            width: 60%;
+            height: 60%;
+            background: var(--glow-2);
+            pointer-events: none;
+            z-index: 0;
+            transition: background 0.35s ease;
+        }
+
+        .container {
+            max-width: 1120px;
+            margin: 0 auto;
+            padding: 0 24px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ===== Controls Bar (Language + Theme) - 居中 ===== */
+        .controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 16px;
+            padding: 12px 0 8px;
+            font-size: 13px;
+            font-weight: 500;
+            flex-wrap: wrap;
+        }
+        .controls-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 40px;
+            padding: 4px;
+            transition: background 0.35s ease, border-color 0.35s ease;
+        }
+        .controls-group button {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 4px 14px;
+            border-radius: 30px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+        .controls-group button.active {
+            background: var(--gradient-btn);
+            color: #fff;
+            box-shadow: 0 2px 12px rgba(124, 58, 237, 0.25);
+        }
+        .controls-group button:hover:not(.active) {
+            color: var(--text-primary);
+            background: var(--bg-card-hover);
+        }
+        .controls-separator {
+            color: var(--text-muted);
+            font-size: 14px;
+            user-select: none;
+        }
+
+        /* ===== Nav ===== */
+        nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 0 20px;
+            border-bottom: 1px solid var(--border-subtle);
+            transition: border-color 0.35s ease;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+        .logo {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+            background: var(--gradient-logo);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .logo span {
+            font-weight: 300;
+            -webkit-text-fill-color: var(--text-muted);
+        }
+        .nav-links {
+            display: flex;
+            gap: 20px;
+            font-size: 14px;
+            font-weight: 500;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+        .nav-links a:hover {
+            color: var(--text-primary);
+        }
+        .nav-links a.gh-btn {
+            background: var(--bg-card);
+            padding: 6px 18px;
+            border-radius: 40px;
+            border: 1px solid var(--border-subtle);
+            color: var(--text-primary);
+            transition: background 0.2s, border-color 0.2s;
+        }
+        .nav-links a.gh-btn:hover {
+            background: var(--bg-card-hover);
+        }
+
+        /* ===== Hero ===== */
+        .hero {
+            padding: 56px 0 48px;
+            text-align: center;
+        }
+        .hero-badge {
+            display: inline-block;
+            background: var(--badge-bg);
+            color: var(--badge-text);
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+            padding: 4px 16px;
+            border-radius: 40px;
+            border: 1px solid var(--badge-border);
+            margin-bottom: 20px;
+            transition: background 0.35s ease, color 0.35s ease, border-color 0.35s ease;
+        }
+        .hero h1 {
+            font-size: 48px;
+            font-weight: 800;
+            letter-spacing: -1.5px;
+            line-height: 1.2;
+            margin-bottom: 12px;
+        }
+        .hero h1 .highlight {
+            background: var(--gradient-hero);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .hero h1 .rotating-word {
+            display: inline-block;
+            min-width: 2em;
+            text-align: center;
+            transition: all 0.2s ease;
+            background: var(--gradient-hero);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .hero p.sub {
+            font-size: 19px;
+            color: var(--text-secondary);
+            max-width: 640px;
+            margin: 0 auto 28px;
+            font-weight: 400;
+            transition: color 0.35s ease;
+        }
+        .hero-actions {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 14px;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 32px;
+            border-radius: 60px;
+            font-weight: 600;
+            font-size: 15px;
+            text-decoration: none;
+            transition: all 0.25s;
+            border: none;
+            cursor: pointer;
+            font-family: inherit;
+        }
+        .btn-primary {
+            background: var(--gradient-btn);
+            color: #fff;
+            box-shadow: var(--shadow-btn);
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-btn-hover);
+        }
+        .btn-secondary {
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border: 1px solid var(--border-subtle);
+        }
+        .btn-secondary:hover {
+            background: var(--bg-card-hover);
+        }
+
+        /* ===== Section Common ===== */
+        section {
+            padding: 40px 0 48px;
+        }
+        .section-label {
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            transition: color 0.35s ease;
+        }
+        .section-title {
+            font-size: 30px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            margin-bottom: 32px;
+        }
+
+        /* ===== Features Grid ===== */
+        .grid-2col {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+        .card {
+            background: var(--bg-card);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            border: 1px solid var(--border-subtle);
+            border-radius: 20px;
+            padding: 26px 26px 30px;
+            transition: background 0.25s, transform 0.2s, border-color 0.35s ease;
+        }
+        .card:hover {
+            background: var(--bg-card-hover);
+            transform: translateY(-3px);
+        }
+        .card .emoji-big {
+            font-size: 30px;
+            display: block;
+            margin-bottom: 10px;
+        }
+        .card h3 {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 4px;
+            letter-spacing: -0.2px;
+        }
+        .card p {
+            font-size: 15px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            transition: color 0.35s ease;
+        }
+        .card .tag {
+            display: inline-block;
+            margin-top: 10px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--tag-text);
+            background: var(--tag-bg);
+            padding: 2px 14px;
+            border-radius: 40px;
+            transition: color 0.35s ease, background 0.35s ease;
+        }
+
+        /* ===== Tech Stack ===== */
+        .tech-stack {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 6px;
+        }
+        .tech-stack span {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            padding: 4px 16px;
+            border-radius: 40px;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            transition: background 0.35s ease, border-color 0.35s ease, color 0.35s ease;
+        }
+        .tech-wiki-link {
+            margin-top: 20px;
+            font-size: 15px;
+            color: var(--text-secondary);
+            transition: color 0.35s ease;
+        }
+        .tech-wiki-link a {
+            color: var(--link-color);
+            text-decoration: none;
+            font-weight: 600;
+            transition: color 0.2s;
+        }
+        .tech-wiki-link a:hover {
+            color: var(--link-hover);
+            text-decoration: underline;
+        }
+
+        /* ===== Steps ===== */
+        .steps {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 24px;
+            margin-top: 20px;
+        }
+        .step {
+            background: var(--bg-step);
+            border-radius: 16px;
+            padding: 22px 22px 26px;
+            border: 1px solid var(--border-subtle);
+            text-align: center;
+            transition: background 0.35s ease, border-color 0.35s ease;
+        }
+        .step .num {
+            display: inline-block;
+            width: 36px;
+            height: 36px;
+            line-height: 36px;
+            border-radius: 50%;
+            background: var(--badge-bg);
+            color: var(--badge-text);
+            font-weight: 700;
+            font-size: 15px;
+            margin-bottom: 10px;
+            transition: background 0.35s ease, color 0.35s ease;
+        }
+        .step h4 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+        .step p {
+            font-size: 14px;
+            color: var(--text-secondary);
+            transition: color 0.35s ease;
+        }
+        .step code {
+            background: var(--bg-code);
+            padding: 1px 8px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-family: 'Inter', monospace;
+            transition: background 0.35s ease;
+        }
+
+        /* ===== Integrate ===== */
+        .integrate-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 32px;
+            margin-top: 12px;
+        }
+        .integrate-box {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 26px 28px;
+            border: 1px solid var(--border-subtle);
+            transition: background 0.35s ease, border-color 0.35s ease;
+        }
+        .integrate-box h3 {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        .integrate-box p {
+            font-size: 15px;
+            color: var(--text-secondary);
+            transition: color 0.35s ease;
+        }
+        .integrate-box .link {
+            display: inline-block;
+            margin-top: 10px;
+            color: var(--link-color);
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 14px;
+            transition: color 0.2s;
+        }
+        .integrate-box .link:hover {
+            color: var(--link-hover);
+        }
+
+        /* ===== Notice ===== */
+        .notice-box {
+            background: var(--bg-notice);
+            border-left: 3px solid var(--border-notice);
+            border-radius: 12px;
+            padding: 18px 26px;
+            transition: background 0.35s ease, border-color 0.35s ease;
+        }
+        .notice-box p {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 3px;
+            transition: color 0.35s ease;
+        }
+        .notice-box p:last-child {
+            margin-bottom: 0;
+        }
+        .notice-box strong {
+            color: var(--text-primary);
+            transition: color 0.35s ease;
+        }
+        .notice-box code {
+            background: var(--bg-code);
+            padding: 1px 8px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-family: 'Inter', monospace;
+            transition: background 0.35s ease;
+        }
+
+        /* ===== Footer ===== */
+        footer {
+            padding: 28px 0 36px;
+            border-top: 1px solid var(--border-subtle);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            font-size: 14px;
+            color: var(--text-footer);
+            transition: border-color 0.35s ease, color 0.35s ease;
+        }
+        footer a {
+            color: var(--text-footer-link);
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+        footer a:hover {
+            color: var(--text-footer-link-hover);
+        }
+        .footer-links {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .footer-links .social-icon {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .footer-links .social-icon svg {
+            width: 16px;
+            height: 16px;
+            fill: currentColor;
+            opacity: 0.7;
+        }
+        .footer-links .email-link {
+            color: var(--text-footer-link);
+        }
+
+        /* ===== Responsive ===== */
+        @media (max-width: 820px) {
+            .hero h1 {
+                font-size: 34px;
+            }
+            .hero p.sub {
+                font-size: 17px;
+            }
+            .grid-2col {
+                grid-template-columns: 1fr;
+            }
+            .steps {
+                grid-template-columns: 1fr;
+                gap: 14px;
+            }
+            .integrate-grid {
+                grid-template-columns: 1fr;
+            }
+            nav {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .nav-links {
+                width: 100%;
+                justify-content: flex-start;
+            }
+            footer {
+                flex-direction: column;
+                text-align: center;
+            }
+            .footer-links {
+                justify-content: center;
+            }
+        }
+        @media (max-width: 480px) {
+            .hero h1 {
+                font-size: 26px;
+            }
+            .hero h1 .rotating-word {
+                min-width: 1.8em;
+            }
+            .btn {
+                padding: 10px 20px;
+                font-size: 14px;
+            }
+            .card {
+                padding: 18px;
+            }
+            .controls-group button {
+                padding: 3px 10px;
+                font-size: 11px;
+            }
+            .section-title {
+                font-size: 24px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="bg-glow"></div>
+    <div class="bg-glow-2"></div>
+
+    <div class="container">
+
+        <!-- ===== Controls: Language + Theme (居中) ===== -->
+        <div class="controls">
+            <!-- Language -->
+            <div class="controls-group" id="langGroup">
+                <button class="active" data-lang="zh" id="langZh">中文</button>
+                <button data-lang="en" id="langEn">English</button>
+            </div>
+            <span class="controls-separator">|</span>
+            <!-- Theme -->
+            <div class="controls-group" id="themeGroup">
+                <button data-theme="light" id="themeLight">☀</button>
+                <button data-theme="dark" id="themeDark">☽</button>
+                <button data-theme="system" class="active" id="themeSystem">◐</button>
+            </div>
+        </div>
+
+        <!-- ===== Nav ===== -->
+        <nav>
+            <div class="logo">Lumina AI <span>Core</span></div>
+            <div class="nav-links">
+                <a href="#features" data-i18n="nav_features">特性</a>
+                <a href="#quickstart" data-i18n="nav_start">快速开始</a>
+                <a href="#integrate" data-i18n="nav_integrate">集成</a>
+                <a href="https://github.com/Happy-380/Lumina-AI-Core/wiki" target="_blank" data-i18n="nav_wiki">Wiki</a>
+                <a href="https://github.com/Happy-380/Lumina-AI-Core" target="_blank" class="gh-btn">GitHub</a>
+            </div>
+        </nav>
+
+        <!-- ===== Hero ===== -->
+        <section class="hero">
+            <div class="hero-badge" data-i18n="hero_badge">✦ 完全离线 · 本地运行</div>
+            <h1>
+                <span data-i18n="hero_title_prefix">一个会</span>
+                <span class="rotating-word highlight" id="rotatingWord">动手</span>
+                <span data-i18n="hero_title_suffix">的</span><br />
+                <span class="highlight" data-i18n="hero_title2">本地 AI 核心</span>
+            </h1>
+            <p class="sub" data-i18n="hero_sub">
+                基于 llama.cpp + GGUF 模型，8GB 内存即可流畅运行。<br />
+                能聊天、能角色扮演、还能操控你的 Windows 电脑。
+            </p>
+            <div class="hero-actions">
+                <a href="https://github.com/Happy-380/Lumina-AI-Core/releases" target="_blank" class="btn btn-primary" data-i18n="hero_btn_download">
+                    ⬇ 下载 Release
+                </a>
+                <a href="https://github.com/Happy-380/Lumina-AI-Core" target="_blank" class="btn btn-secondary">
+                    <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" style="opacity:0.7;"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                    <span data-i18n="hero_btn_star">Star on GitHub</span>
+                </a>
+            </div>
+        </section>
+
+        <!-- ===== Features ===== -->
+        <section id="features">
+            <div class="section-label" data-i18n="features_label">✦ 它酷在哪</div>
+            <h2 class="section-title" data-i18n="features_title">轻量 · 有温度 · 能动手</h2>
+            <div class="grid-2col">
+                <div class="card">
+                    <span class="emoji-big">🧠</span>
+                    <h3 data-i18n="feat1_title">超轻量级大脑</h3>
+                    <p data-i18n="feat1_desc">基于 <strong>Bonsai 1-Bit LLM</strong>，8GB 内存即可流畅运行，无需 GPU，告别 API 费用。在 12 代 i5 上可达约 <strong>100 tokens/s</strong>。</p>
+                    <span class="tag" data-i18n="feat1_tag">离线 · 低成本</span>
+                </div>
+                <div class="card">
+                    <span class="emoji-big">🎭</span>
+                    <h3 data-i18n="feat2_title">自带人格</h3>
+                    <p data-i18n="feat2_desc">内置“埃文”（严谨）和“米娅”（活泼）两种角色，闲聊零成本。一键切换，让对话更有温度。</p>
+                    <span class="tag" data-i18n="feat2_tag">角色扮演</span>
+                </div>
+                <div class="card">
+                    <span class="emoji-big">✨</span>
+                    <h3 data-i18n="feat3_title">萌系输出</h3>
+                    <p data-i18n="feat3_desc">一键启用 <strong>Miya 语言风格</strong>，让 AI 的回复变得口语化、可爱、有温度。</p>
+                    <span class="tag" data-i18n="feat3_tag">风格转换</span>
+                </div>
+                <div class="card">
+                    <span class="emoji-big">🖥️</span>
+                    <h3 data-i18n="feat4_title">动手能力</h3>
+                    <p data-i18n="feat4_desc">通过 <strong>MCP 协议</strong> 真正控制你的 Windows 电脑——打开软件、读写文件等。每次操作需你确认，安全可控。</p>
+                    <span class="tag" data-i18n="feat4_tag">MCP · 安全确认</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== Tech Stack + Wiki Link ===== -->
+        <section>
+            <div class="section-label" data-i18n="tech_label">⚙️ 技术栈</div>
+            <h2 class="section-title" data-i18n="tech_title">如何构建</h2>
+            <div class="tech-stack">
+                <span>.NET 8</span>
+                <span>llama.cpp</span>
+                <span>GGUF</span>
+                <span>MCP Protocol</span>
+                <span>Bonsai-8B</span>
+                <span>Windows Native</span>
+            </div>
+            <p style="margin-top:16px;color:var(--text-secondary);font-size:15px;transition:color 0.35s ease;" data-i18n="tech_desc">
+                Lumina 不仅是一个可直接运行的 <strong>控制台应用</strong>，同时也被设计为 <strong>.NET 类库</strong>，可轻松集成到 WinForms / WPF / Web / WinUI 应用中，快速打造你自己的 AI 产品。
+            </p>
+            <!-- Wiki 详细文档链接 -->
+            <div class="tech-wiki-link" data-i18n="tech_wiki">
+                📖 详细文档请查看 <a href="https://github.com/Happy-380/Lumina-AI-Core/wiki" target="_blank">Wiki</a>，包含完整的集成指南与 API 说明。
+            </div>
+        </section>
+
+        <!-- ===== Quick Start ===== -->
+        <section id="quickstart">
+            <div class="section-label" data-i18n="start_label">⚡ 快速体验</div>
+            <h2 class="section-title" data-i18n="start_title">三步启动</h2>
+            <div class="steps">
+                <div class="step">
+                    <div class="num">1</div>
+                    <h4 data-i18n="step1_title">下载 Release</h4>
+                    <p data-i18n="step1_desc">获取 <code>bin.zip.001</code> 和 <code>.002</code></p>
+                </div>
+                <div class="step">
+                    <div class="num">2</div>
+                    <h4 data-i18n="step2_title">解压</h4>
+                    <p data-i18n="step2_desc">解压后双击 <code>Lumina-AI.exe</code></p>
+                </div>
+                <div class="step">
+                    <div class="num">3</div>
+                    <h4 data-i18n="step3_title">开始对话</h4>
+                    <p data-i18n="step3_desc">在控制台输入你的问题，AI 即刻回应</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== Integrate + Contribute ===== -->
+        <section id="integrate">
+            <div class="integrate-grid">
+                <div class="integrate-box">
+                    <h3 data-i18n="integrate_title">🧩 集成到你的项目</h3>
+                    <p data-i18n="integrate_desc">Lumina 设计为 <strong>.NET 类库</strong>，可轻松集成到 WinForms / WPF / Web / WinUI 应用中，快速打造你自己的 AI 产品。</p>
+                    <a href="https://github.com/Happy-380/Lumina-AI-Core/wiki" target="_blank" class="link" data-i18n="integrate_link">查看集成文档 →</a>
+                </div>
+                <div class="integrate-box">
+                    <h3 data-i18n="contribute_title">⭐ 贡献与反馈</h3>
+                    <p data-i18n="contribute_desc">欢迎提交 Issue 和 PR。如果你觉得这个项目有帮助，别忘了点个 Star 支持一下！</p>
+                    <a href="https://github.com/Happy-380/Lumina-AI-Core/issues" target="_blank" class="link" data-i18n="contribute_link">提交 Issue →</a>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== Notice ===== -->
+        <section>
+            <div class="notice-box">
+                <p><strong data-i18n="notice_title">⚠️ 注意事项</strong></p>
+                <p data-i18n="notice_1">• 模型文件较大（Bonsai-8B 约 1.1 GB），仓库通过 csproj 自动拷贝到输出目录。</p>
+                <p data-i18n="notice_2">• <code>WindowsMcp.exe</code> 为第三方 MCP 服务器，允许 AI 操控电脑存在安全风险，请仅在可信环境中使用。</p>
+                <p data-i18n="notice_3">• 程序退出时会主动清理所有 <code>llama-server</code> 进程；MCP 客户端释放可能挂起，内置了 5 秒超时保护。</p>
+                <p data-i18n="notice_4">• <strong>项目不会自动保存历史记录</strong>，关闭程序后以前的上下文就会删除。</p>
+            </div>
+        </section>
+
+        <!-- ===== Footer ===== -->
+        <footer>
+            <span>
+                © 2026 <a href="https://github.com/Happy-380" target="_blank">Happy-380</a>
+                <span data-i18n="footer_made">· 用 ❤️ 打造</span>
+            </span>
+            <div class="footer-links">
+                <a href="https://github.com/Happy-380/Lumina-AI-Core" target="_blank">GitHub</a>
+                <a href="https://github.com/Happy-380/Lumina-AI-Core/releases" target="_blank" data-i18n="footer_releases">Releases</a>
+                <a href="https://github.com/Happy-380/Lumina-AI-Core/issues" target="_blank" data-i18n="footer_issues">Issues</a>
+                <a href="https://github.com/Happy-380/Lumina-AI-Core/wiki" target="_blank" data-i18n="footer_wiki">Wiki</a>
+                <a href="https://space.bilibili.com/3546376302496335" target="_blank" class="social-icon" aria-label="Bilibili">
+                    <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+                    B站
+                </a>
+                <a href="mailto:happy-380@outlook.com" class="email-link social-icon">
+                    <svg viewBox="0 0 24 24"><path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+                    happy-380@outlook.com
+                </a>
+            </div>
+        </footer>
+
+    </div>
+
+    <script>
+        // ============================================================
+        // 1. I18N (中 / 英)
+        // ============================================================
+        const i18n = {
+            zh: {
+                nav_features: '特性',
+                nav_start: '快速开始',
+                nav_integrate: '集成',
+                nav_wiki: 'Wiki',
+                hero_badge: '✦ 完全离线 · 本地运行',
+                hero_title_prefix: '一个会',
+                hero_title_suffix: '的',
+                hero_title2: '本地 AI 核心',
+                hero_sub: '基于 llama.cpp + GGUF 模型，8GB 内存即可流畅运行。<br />能聊天、能角色扮演、还能操控你的 Windows 电脑。',
+                hero_btn_download: '⬇ 下载 Release',
+                hero_btn_star: 'Star on GitHub',
+                features_label: '✦ 它酷在哪',
+                features_title: '轻量 · 有温度 · 能动手',
+                feat1_title: '超轻量级大脑',
+                feat1_desc: '基于 <strong>Bonsai 1-Bit LLM</strong>，8GB 内存即可流畅运行，无需 GPU，告别 API 费用。在 12 代 i5 上可达约 <strong>100 tokens/s</strong>。',
+                feat1_tag: '离线 · 低成本',
+                feat2_title: '自带人格',
+                feat2_desc: '内置“埃文”（严谨）和“米娅”（活泼）两种角色，闲聊零成本。一键切换，让对话更有温度。',
+                feat2_tag: '角色扮演',
+                feat3_title: '萌系输出',
+                feat3_desc: '一键启用 <strong>Miya 语言风格</strong>，让 AI 的回复变得口语化、可爱、有温度。',
+                feat3_tag: '风格转换',
+                feat4_title: '动手能力',
+                feat4_desc: '通过 <strong>MCP 协议</strong> 真正控制你的 Windows 电脑——打开软件、读写文件等。每次操作需你确认，安全可控。',
+                feat4_tag: 'MCP · 安全确认',
+                tech_label: '⚙️ 技术栈',
+                tech_title: '如何构建',
+                tech_desc: 'Lumina 不仅是一个可直接运行的 <strong>控制台应用</strong>，同时也被设计为 <strong>.NET 类库</strong>，可轻松集成到 WinForms / WPF / Web / WinUI 应用中，快速打造你自己的 AI 产品。',
+                tech_wiki: '📖 详细文档请查看 <a href="https://github.com/Happy-380/Lumina-AI-Core/wiki" target="_blank">Wiki</a>，包含完整的集成指南与 API 说明。',
+                start_label: '⚡ 快速体验',
+                start_title: '三步启动',
+                step1_title: '下载 Release',
+                step1_desc: '获取 <code>bin.zip.001</code> 和 <code>.002</code>',
+                step2_title: '解压',
+                step2_desc: '解压后双击 <code>Lumina-AI.exe</code>',
+                step3_title: '开始对话',
+                step3_desc: '在控制台输入你的问题，AI 即刻回应',
+                integrate_title: '🧩 集成到你的项目',
+                integrate_desc: 'Lumina 设计为 <strong>.NET 类库</strong>，可轻松集成到 WinForms / WPF / Web / WinUI 应用中，快速打造你自己的 AI 产品。',
+                integrate_link: '查看集成文档 →',
+                contribute_title: '⭐ 贡献与反馈',
+                contribute_desc: '欢迎提交 Issue 和 PR。如果你觉得这个项目有帮助，别忘了点个 Star 支持一下！',
+                contribute_link: '提交 Issue →',
+                notice_title: '⚠️ 注意事项',
+                notice_1: '• 模型文件较大（Bonsai-8B 约 1.1 GB），仓库通过 csproj 自动拷贝到输出目录。',
+                notice_2: '• <code>WindowsMcp.exe</code> 为第三方 MCP 服务器，允许 AI 操控电脑存在安全风险，请仅在可信环境中使用。',
+                notice_3: '• 程序退出时会主动清理所有 <code>llama-server</code> 进程；MCP 客户端释放可能挂起，内置了 5 秒超时保护。',
+                notice_4: '• <strong>项目不会自动保存历史记录</strong>，关闭程序后以前的上下文就会删除。',
+                footer_made: '· 用 ❤️ 打造',
+                footer_releases: 'Releases',
+                footer_issues: 'Issues',
+                footer_wiki: 'Wiki',
+            },
+            en: {
+                nav_features: 'Features',
+                nav_start: 'Quick Start',
+                nav_integrate: 'Integrate',
+                nav_wiki: 'Wiki',
+                hero_badge: '✦ Fully Offline · Local Runtime',
+                hero_title_prefix: 'An AI that ',
+                hero_title_suffix: '',
+                hero_title2: 'Local AI Core',
+                hero_sub: 'Built on llama.cpp + GGUF, runs smoothly on 8GB RAM.<br />Chat, role-play, and control your Windows PC.',
+                hero_btn_download: '⬇ Download Release',
+                hero_btn_star: 'Star on GitHub',
+                features_label: '✦ What Makes It Cool',
+                features_title: 'Lightweight · Warm · Capable',
+                feat1_title: 'Ultra-Lightweight Brain',
+                feat1_desc: 'Powered by <strong>Bonsai 1-Bit LLM</strong>, runs on 8GB RAM, no GPU needed, no API fees. ~<strong>100 tokens/s</strong> on 12th Gen i5.',
+                feat1_tag: 'Offline · Low Cost',
+                feat2_title: 'Built-in Personas',
+                feat2_desc: 'Includes “Evan” (precise) and “Mia” (lively) — zero-cost casual chat. Switch with one click.',
+                feat2_tag: 'Role-Play',
+                feat3_title: 'Cute Output Style',
+                feat3_desc: 'Enable <strong>Miya style</strong> to make responses more spoken, cute, and warm.',
+                feat3_tag: 'Style Transfer',
+                feat4_title: 'Take Action',
+                feat4_desc: 'Control your Windows PC via <strong>MCP protocol</strong> — open apps, read/write files, etc. Every action requires your confirmation.',
+                feat4_tag: 'MCP · Secure',
+                tech_label: '⚙️ Tech Stack',
+                tech_title: 'How It\'s Built',
+                tech_desc: 'Lumina is not only a ready-to-run <strong>console application</strong>, but also designed as a <strong>.NET library</strong> for easy integration into WinForms, WPF, Web, or WinUI apps to build your own AI products.',
+                tech_wiki: '📖 Check the <a href="https://github.com/Happy-380/Lumina-AI-Core/wiki" target="_blank">Wiki</a> for detailed documentation, integration guides, and API references.',
+                start_label: '⚡ Quick Start',
+                start_title: 'Three Steps to Launch',
+                step1_title: 'Download Release',
+                step1_desc: 'Get <code>bin.zip.001</code> and <code>.002</code>',
+                step2_title: 'Extract',
+                step2_desc: 'Extract and double-click <code>Lumina-AI.exe</code>',
+                step3_title: 'Start Chatting',
+                step3_desc: 'Type your question in the console, AI responds instantly',
+                integrate_title: '🧩 Integrate into Your Project',
+                integrate_desc: 'Lumina is a <strong>.NET library</strong> — easily integrate into WinForms / WPF / Web / WinUI apps to build your own AI product.',
+                integrate_link: 'View Integration Docs →',
+                contribute_title: '⭐ Contribute & Feedback',
+                contribute_desc: 'Issues and PRs are welcome. If you find this project helpful, don\'t forget to star it!',
+                contribute_link: 'Submit Issue →',
+                notice_title: '⚠️ Notes',
+                notice_1: '• Model file is large (Bonsai-8B ~1.1 GB), auto-copied via csproj.',
+                notice_2: '• <code>WindowsMcp.exe</code> is a 3rd-party MCP server — AI control carries security risks, use only in trusted environments.',
+                notice_3: '• Program cleans up <code>llama-server</code> processes on exit; MCP client release may hang with a 5s timeout.',
+                notice_4: '• <strong>No history auto-save</strong> — context is lost after closing the program.',
+                footer_made: '· Made with ❤️',
+                footer_releases: 'Releases',
+                footer_issues: 'Issues',
+                footer_wiki: 'Wiki',
+            }
+        };
+
+        // ============================================================
+        // 2. Rotating Words Logic
+        // ============================================================
+        const rotatingWords = {
+            zh: ['动手', '思考', '创造', '生成', '理解', '执行', '表达'],
+            en: ['Act', 'Think', 'Create', 'Generate', 'Understand', 'Execute', 'Speak']
+        };
+        let wordIndex = 0;
+        let rotateInterval = null;
+
+        function rotateWord() {
+            const el = document.getElementById('rotatingWord');
+            if (!el) return;
+            const lang = currentLang || 'zh';
+            const words = rotatingWords[lang] || rotatingWords['zh'];
+            el.textContent = words[wordIndex % words.length];
+            wordIndex++;
+        }
+
+        function startRotating() {
+            if (rotateInterval) clearInterval(rotateInterval);
+            rotateInterval = setInterval(rotateWord, 3000);
+        }
+
+        // ============================================================
+        // 3. I18N Setup & Language Switching
+        // ============================================================
+        let currentLang = 'zh';
+
+        function setLanguage(lang) {
+            currentLang = lang;
+            // Update all i18n elements
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.getAttribute('data-i18n');
+                const translation = i18n[lang]?.[key];
+                if (translation !== undefined) {
+                    if (translation.includes('<') && translation.includes('>')) {
+                        el.innerHTML = translation;
+                    } else {
+                        el.textContent = translation;
+                    }
+                }
+            });
+            // Update language buttons
+            document.querySelectorAll('#langGroup button').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.lang === lang);
+            });
+            document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+
+            // Reset rotating word index and refresh immediately
+            wordIndex = 0;
+            rotateWord();
+        }
+
+        // ============================================================
+        // 4. Theme (Light / Dark / System)
+        // ============================================================
+        function getSystemTheme() {
+            return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+
+        let currentTheme = 'system';
+
+        function applyTheme(theme) {
+            currentTheme = theme;
+            const effective = theme === 'system' ? getSystemTheme() : theme;
+            document.documentElement.setAttribute('data-theme', effective);
+            document.querySelectorAll('#themeGroup button').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.theme === theme);
+            });
+            try {
+                localStorage.setItem('lumina-theme', theme);
+            } catch (_) { /* ignore */ }
+        }
+
+        // ============================================================
+        // 5. Detect initial language & theme
+        // ============================================================
+        function detectLanguage() {
+            const browserLang = navigator.language || navigator.languages?.[0] || 'zh';
+            return browserLang.startsWith('zh') ? 'zh' : 'en';
+        }
+
+        let savedTheme = 'system';
+        try {
+            const stored = localStorage.getItem('lumina-theme');
+            if (stored === 'light' || stored === 'dark' || stored === 'system') {
+                savedTheme = stored;
+            }
+        } catch (_) { /* ignore */ }
+        applyTheme(savedTheme);
+
+        const initialLang = detectLanguage();
+        setLanguage(initialLang);
+        startRotating();
+
+        // ============================================================
+        // 6. Event listeners
+        // ============================================================
+        // Language buttons
+        document.querySelectorAll('#langGroup button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                setLanguage(btn.dataset.lang);
+            });
+        });
+
+        // Theme buttons
+        document.querySelectorAll('#themeGroup button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                applyTheme(btn.dataset.theme);
+            });
+        });
+
+        // Listen for system theme changes
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+            if (currentTheme === 'system') {
+                applyTheme('system');
+            }
+        });
+
+        // ============================================================
+        // 7. Smooth scroll for anchor links
+        // ============================================================
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function(e) {
+                const targetId = this.getAttribute('href');
+                if (targetId === '#') return;
+                const target = document.querySelector(targetId);
+                if (target) {
+                    e.preventDefault();
+                    target.scrollIntoView({ behavior: 'smooth' });
+                }
+            });
+        });
+    </script>
+
+</body>
+</html>
