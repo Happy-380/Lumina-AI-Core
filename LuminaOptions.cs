@@ -61,6 +61,10 @@ namespace LlamaChat
         // ---- 工具调用 ----
         public int MaxToolCallIterations { get; set; } = 10;
 
+        // ---- 智能工具选择（MCP）----
+        /// <summary>每次请求预选并发送给模型的工具数量（默认 4；0 = 禁用智能选择，回退发送全部工具）。</summary>
+        public int SelectedToolsPerRequest { get; set; } = 4;
+
         // ---- 目录 / 可执行文件 ----
         public string LlamaFolderName { get; set; } = AppConfig.LlamaFolderName;
         public string McpFolderName { get; set; } = AppConfig.McpFolderName;

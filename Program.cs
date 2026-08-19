@@ -177,6 +177,7 @@ namespace LlamaChat
         // +MCP: 相关字段
         private McpClient _mcpClient;
         private List<McpClientTool> _mcpTools;
+        private McpToolSelector _toolSelector;
         private bool _isMcpReady = false;
         private readonly HashSet<string> _dangerousTools = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -498,8 +499,9 @@ namespace LlamaChat
                 _mcpClient = await McpClient.CreateAsync(transport);
                 var toolsResult = await _mcpClient.ListToolsAsync();
                 _mcpTools = toolsResult.ToList();
+                _toolSelector = new McpToolSelector(_mcpTools, () => _options.Language);
                 _isMcpReady = true;
-                Log(LogLevel.Success, T("MCP 已就绪，加载了 {0} 个工具", "MCP ready, loaded {0} tool(s)", _mcpTools.Count));
+                Log(LogLevel.Success, T("MCP 已就绪，加载了 {0} 个工具（智能选择：每次预选 {1} 个）", "MCP ready, loaded {0} tool(s) (smart selection: {1} per request)", _mcpTools.Count, _options.SelectedToolsPerRequest));
             }
             catch (Exception ex)
             {
@@ -508,25 +510,148 @@ namespace LlamaChat
             }
         }
 
-        // +MCP: 将 MCP 工具转换为 OpenAI 格式的 tools 数组
+        // +MCP: 组合工具选择的打分文本：当前输入 + 最近用户消息 + 相关历史
+        private static string BuildSelectionQueryText(string userInput, JArray windowMessages, List<(string Role, string Content)> relevantHistories)
+        {
+            var queryParts = new List<string> { userInput };
+            if (windowMessages != null)
+            {
+                var recentUsers = windowMessages
+                    .Where(m => m["role"]?.ToString() == "user")
+                    .Select(m => m["content"]?.ToString() ?? "")
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .TakeLast(3);
+                queryParts.AddRange(recentUsers);
+            }
+            if (relevantHistories != null)
+                queryParts.AddRange(relevantHistories.TakeLast(2).Select(h => h.Content));
+            return string.Join("\n", queryParts);
+        }
+
+        // +MCP: 将 MCP 工具转换为 OpenAI 格式的 tools 数组（全量；仅在禁用智能选择时使用）
         private JArray BuildToolsJson()
         {
             var toolsArray = new JArray();
             foreach (var tool in _mcpTools)
-            {
-                var toolObj = new JObject
-                {
-                    ["type"] = "function",
-                    ["function"] = new JObject
-                    {
-                        ["name"] = tool.Name,
-                        ["description"] = tool.Description ?? "",
-                        ["parameters"] = JObject.Parse(tool.JsonSchema.GetRawText())
-                    }
-                };
-                toolsArray.Add(toolObj);
-            }
+                toolsArray.Add(MakeFunctionTool(tool.Name, tool.Description ?? "", tool.JsonSchema.GetRawText()));
             return toolsArray;
+        }
+
+        // +MCP: 智能构建 tools —— 仅预选最可能需要的 N 个工具（完整 schema）+ 2 个本地元工具
+        private JArray BuildSmartToolsJson(List<McpClientTool> selected)
+        {
+            if (_toolSelector == null || selected == null || selected.Count == 0) return new JArray();
+
+            Log(LogLevel.Info, T("智能预选 {0} 个工具: {1}", "Smart-pre-selected {0} tool(s): {1}",
+                selected.Count, string.Join(", ", selected.Select(t => t.Name))));
+
+            var toolsArray = new JArray();
+            foreach (var tool in selected)
+                toolsArray.Add(MakeFunctionTool(tool.Name, tool.Description ?? "", tool.JsonSchema.GetRawText()));
+
+            // 元工具 1：查看全部工具概述（名称 + 一行用途，不含参数）
+            toolsArray.Add(MakeFunctionTool(
+                "list_tools",
+                T("列出全部可用工具的概述（仅名称与用途，不含参数）。当预选工具都不适合当前任务时使用。",
+                  "List an overview of ALL available tools (name + purpose only, no parameters). Use when none of the pre-selected tools fit the task."),
+                "{\"type\":\"object\",\"properties\":{}}"));
+
+            // 元工具 2：获取指定工具的完整参数说明
+            toolsArray.Add(MakeFunctionTool(
+                "get_tool_usage",
+                T("获取指定工具的完整参数说明（JSON Schema）。参数 tool_name 填工具名（如 file_read）。",
+                  "Get the full parameter documentation (JSON Schema) of a specific tool. Pass the exact tool name as tool_name (e.g. file_read)."),
+                "{\"type\":\"object\",\"properties\":{\"tool_name\":{\"type\":\"string\",\"description\":\"Exact tool name, e.g. file_read\"}},\"required\":[\"tool_name\"]}"));
+
+            return toolsArray;
+        }
+
+        // +MCP: 构造单个 OpenAI 格式 function 工具
+        private static JObject MakeFunctionTool(string name, string description, string schemaJson)
+        {
+            return new JObject
+            {
+                ["type"] = "function",
+                ["function"] = new JObject
+                {
+                    ["name"] = name,
+                    ["description"] = description,
+                    ["parameters"] = JObject.Parse(schemaJson)
+                }
+            };
+        }
+
+        // ---- 解析 Claude 风格文本工具调用（Bonsai 等模型可能不在 tool_calls 里输出，
+        //      而是在 content 中直接输出 {"name":"xxx","arguments":{...}}</tool_call> 或 XML <invoke>）----
+        // isKnownTool：仅当工具名是真实存在的工具时才解析成功，避免误把普通对话 JSON 当工具调用。
+        private static bool TryParseTextToolCall(string content, Func<string, bool> isKnownTool, out string toolName, out JObject args)
+        {
+            toolName = null;
+            args = null;
+            if (string.IsNullOrWhiteSpace(content)) return false;
+
+            // ---- 形式 1：JSON（容忍 ```json 代码块、</tool_call>、<function_calls> 等包裹）----
+            string jsonText = Regex.Replace(content,
+                @"```(?:json)?\s*|```|</?tool_call>|</?function_calls?>",
+                "", RegexOptions.IgnoreCase);
+            int s = jsonText.IndexOf('{');
+            int e = jsonText.LastIndexOf('}');
+            if (s >= 0 && e > s)
+            {
+                string json = jsonText.Substring(s, e - s + 1);
+                try
+                {
+                    var obj = JObject.Parse(json);
+                    var name = obj["name"]?.ToString();
+                    if (!string.IsNullOrEmpty(name) && isKnownTool(name) && obj["arguments"] != null)
+                    {
+                        toolName = name;
+                        args = obj["arguments"] as JObject;
+                        if (args == null)
+                        {
+                            string argsStr = obj["arguments"]?.ToString();
+                            try { args = JObject.Parse(argsStr); }
+                            catch { args = new JObject(); }
+                        }
+                        return true;
+                    }
+                }
+                catch { /* 不是合法 JSON，继续尝试 XML 形式 */ }
+            }
+
+            // ---- 形式 2：XML <invoke name="xxx"><parameter name="k">v</parameter>...</invoke> ----
+            var m = Regex.Match(content,
+                @"<invoke\s+name=[""']([A-Za-z0-9_]+)[""']\s*>(.*?)</invoke>",
+                RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            if (m.Success && isKnownTool(m.Groups[1].Value))
+            {
+                toolName = m.Groups[1].Value;
+                args = new JObject();
+                foreach (Match p in Regex.Matches(m.Groups[2].Value,
+                             @"<parameter\s+name=[""']([^""']+)[""']\s*>(.*?)</parameter>",
+                             RegexOptions.Singleline | RegexOptions.IgnoreCase))
+                {
+                    string key = p.Groups[1].Value.Trim();
+                    string val = p.Groups[2].Value.Trim();
+                    if (val.Length == 0) { args[key] = ""; continue; }
+                    if (val[0] == '{' || val[0] == '[' || val[0] == '"' ||
+                        val.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                        val.Equals("false", StringComparison.OrdinalIgnoreCase) ||
+                        val.Equals("null", StringComparison.OrdinalIgnoreCase) ||
+                        double.TryParse(val, out _))
+                    {
+                        try { args[key] = JToken.Parse(val); }
+                        catch { args[key] = val; }
+                    }
+                    else
+                    {
+                        args[key] = val;
+                    }
+                }
+                return true;
+            }
+
+            return false;
         }
 
         // +MCP: 封装 HTTP 调用（根据当前端口）
@@ -696,6 +821,22 @@ namespace LlamaChat
                     messages.Add(msg);
             }
 
+            // 5.3b 工具使用引导（仅操控模式且启用智能选择时）：
+            // 预选工具在此一次性完成（与请求中的 tools 数组共用同一份），
+            // 并把“工具名+用途”以纯文本注入，帮助小模型正确选择。
+            List<McpClientTool> smartSelected = null;
+            if (allowControl && _isMcpReady && _toolSelector != null && _options.SelectedToolsPerRequest > 0)
+            {
+                smartSelected = _toolSelector.SelectTopTools(
+                    BuildSelectionQueryText(userInput, windowMessages, relevantHistories),
+                    _options.SelectedToolsPerRequest);
+                messages.Add(new JObject
+                {
+                    ["role"] = "system",
+                    ["content"] = _toolSelector.GetSelectionInstructions(smartSelected)
+                });
+            }
+
             // 5.4 当前用户输入
             messages.Add(new JObject
             {
@@ -706,6 +847,13 @@ namespace LlamaChat
             // 6. 工具调用循环
             int maxIterations = _options.MaxToolCallIterations;
             int operationCount = 0;
+            int metaOperationCount = 0;   // 元工具（list_tools / get_tool_usage）调用计数
+            int roundCount = 0;           // 已进行的工具轮数（用于收尾提醒）
+            int noProgressRounds = 0;     // 连续无有效结果轮数（用于强制收尾）
+            string lastToolResult = "";  // 最后一次工具执行结果（仅日志用）
+            var successfulOps = new List<string>(); // 成功操作摘要（结束时让模型据此生成一句话总结）
+            var executedCalls = new HashSet<string>(StringComparer.Ordinal); // 防重复调用（tool+args）
+            bool expandTools = false;     // 模型请求 list_tools 后，下一轮发送全部工具（弱模型无需两步即可直接调用）
             bool isFirstToolCall = true;
             bool isControlMode = false;
             bool userCancelled = false;
@@ -722,7 +870,11 @@ namespace LlamaChat
 
                 if (allowControl && _isMcpReady)
                 {
-                    requestBody["tools"] = BuildToolsJson();
+                    // 模型请求过 list_tools：本轮发送全部工具（含完整 schema），弱模型可直接调用正确工具
+                    requestBody["tools"] = expandTools
+                        ? BuildToolsJson()
+                        : (smartSelected is { Count: > 0 } ? BuildSmartToolsJson(smartSelected) : BuildToolsJson());
+                    expandTools = false;   // 仅放开一轮，之后回到智能预选以节省 token
                 }
 
                 Log(LogLevel.Info, T("========== 请求（发送给模型） ==========", "========== Request (sent to model) =========="));
@@ -758,7 +910,66 @@ namespace LlamaChat
                 Log(LogLevel.Info, response.ToString(Formatting.Indented));
                 Log(LogLevel.Info, T("=======================================", "==========================================="));
 
-                if (toolCalls != null && toolCalls.Count > 0)
+                // 文本标记回退：模型可能以纯文本输出预设指令（而非工具调用）
+                //   [LIST_TOOLS] / [工具列表]  → 注入全部工具概述；[USAGE:xxx] / [用法:xxx] → 注入某工具用法
+                if (allowControl && _toolSelector != null && toolCalls is not { Count: > 0 } && !string.IsNullOrWhiteSpace(content))
+                {
+                    bool markerHandled = false;
+                    var mList = Regex.Match(content, @"\[(?:LIST_TOOLS|ALL_TOOLS|TOOLS|工具列表)\]", RegexOptions.IgnoreCase);
+                    if (mList.Success)
+                    {
+                        messages.Add(new JObject { ["role"] = "system", ["content"] = _toolSelector.GetOverview() });
+                        expandTools = true;   // 下一轮提供全部工具 schema
+                        messages.Add(new JObject
+                        {
+                            ["role"] = "user",
+                            ["content"] = T(
+                                "请从上面的工具中选择一个：直接用合适的工具完成我的请求（全部工具的参数说明已提供）。",
+                                "Pick the right tool from the list above and call it directly to fulfill my request (all tool parameter docs are provided).")
+                        });
+                        markerHandled = true;
+                    }
+                    else
+                    {
+                        var mUsage = Regex.Match(content, @"\[(?:USAGE|用法)\s*:\s*([A-Za-z0-9_]+)\]", RegexOptions.IgnoreCase);
+                        if (mUsage.Success)
+                        {
+                            string tname = mUsage.Groups[1].Value;
+                            messages.Add(new JObject
+                            {
+                                ["role"] = "system",
+                                ["content"] = _toolSelector.GetUsage(tname)
+                                    ?? T("未找到工具 {0}。请先调用 list_tools 查看全部工具名称。", "Tool {0} not found. Call list_tools first to see all tool names.", tname)
+                            });
+                            markerHandled = true;
+                        }
+                    }
+                    if (markerHandled) continue;
+                }
+
+                // 收集待执行的工具调用：优先标准 tool_calls 数组，其次解析 Claude 风格文本 JSON/XML
+                //（Bonsai 等模型可能不在 tool_calls 里输出，而是直接输出 {"name":...,"arguments":{...}}</tool_call>）
+                var pendingCalls = new List<(string Id, string Name, JObject Args)>();
+                if (toolCalls is { Count: > 0 })
+                {
+                    foreach (var tc in toolCalls)
+                    {
+                        var tName = tc["function"]?["name"]?.ToString() ?? "";
+                        if (string.IsNullOrEmpty(tName)) continue;
+                        var argsJson = tc["function"]?["arguments"]?.ToString() ?? "{}";
+                        JObject tArgs;
+                        try { tArgs = JObject.Parse(argsJson); }
+                        catch { tArgs = new JObject(); }
+                        pendingCalls.Add((tc["id"]?.ToString() ?? Guid.NewGuid().ToString("N"), tName, tArgs));
+                    }
+                }
+                else if (_toolSelector != null && TryParseTextToolCall(content, _toolSelector.IsKnownTool, out var textToolName, out var textArgs))
+                {
+                    Log(LogLevel.Info, T("检测到文本格式工具调用：{0}（参数：{1}）", "Detected text-format tool call: {0} (args: {1})", textToolName, textArgs.ToString(Formatting.None)));
+                    pendingCalls.Add((Guid.NewGuid().ToString("N"), textToolName, textArgs));
+                }
+
+                if (pendingCalls.Count > 0)
                 {
                     if (!allowControl)
                     {
@@ -786,71 +997,194 @@ namespace LlamaChat
                         isFirstToolCall = false;
                     }
 
-                    messages.Add(message);
-
-                    var toolResultMessages = new JArray();
-                    foreach (var tc in toolCalls)
+                    // 先执行所有调用、收集结果；失败的错误结果不进入对话（避免带偏模型），
+                    // 并避免悬空的 tool_calls 造成格式错误
+                    var executedResults = new List<(string CallId, string ToolName, string Content)>();
+                    bool roundMadeProgress = false;   // 本轮是否产生了有效结果
+                    foreach (var (callId, toolName, args) in pendingCalls)
                     {
-                        var toolName = tc["function"]["name"].ToString();
-                        var argsJson = tc["function"]["arguments"].ToString();
-                        var args = JObject.Parse(argsJson);
+                        var argsJson = args.ToString(Formatting.None);
+
+                        // 防死循环：相同工具 + 相同参数不重复执行，直接提示模型收尾
+                        string callKey = $"{toolName}|{argsJson}";
+                        if (!executedCalls.Add(callKey))
+                        {
+                            executedResults.Add((callId, toolName, T(
+                                "重复调用：{0} 已用相同参数执行过，结果见上一条。请基于已有结果直接回答用户，不要再重复调用相同工具；如需其他操作请使用不同参数或调用 list_tools。",
+                                "Duplicate call: {0} was already executed with identical arguments (see previous result). Answer the user directly based on existing results; do not repeat the same call. Use different arguments or call list_tools if you need something else.",
+                                toolName)));
+                            continue;
+                        }
 
                         if (_dangerousTools.Contains(toolName))
                         {
                             bool ok = await ConfirmAsync(T("即将执行危险操作：{0}，参数：{1}，是否继续？", "About to perform a DANGEROUS operation: {0}, args: {1}. Continue?", toolName, argsJson));
                             if (!ok)
                             {
-                                var failResult = new JObject
-                                {
-                                    ["role"] = "tool",
-                                    ["tool_call_id"] = tc["id"].ToString(),
-                                    ["content"] = T("用户取消了危险操作 {0}", "User cancelled dangerous operation {0}", toolName)
-                                };
-                                toolResultMessages.Add(failResult);
+                                executedResults.Add((callId, toolName, T("用户取消了危险操作 {0}", "User cancelled dangerous operation {0}", toolName)));
                                 continue;
                             }
                         }
 
-                        Log(LogLevel.Success, T("正在执行：{0}，参数：{1}", "Executing: {0}, args: {1}", toolName, argsJson));
+                        string resultContent;
+                        bool callMadeProgress = false;   // 该调用是否产生了有效结果（用于无进展检测）
 
-                        try
+                        // 元工具：本地处理（查看全部工具概述 / 查看单个工具用法），不发送给 MCP
+                        if (toolName.Equals("list_tools", StringComparison.OrdinalIgnoreCase) && _toolSelector != null)
                         {
-                            var argsDict = args.ToObject<Dictionary<string, object?>>();
-                            var toolResult = await _mcpClient.CallToolAsync(toolName, argsDict);
-                            string resultContent;
-                            if (toolResult.Content is JArray arr && arr.Count > 0)
-                            {
-                                var texts = arr.Select(c => c["text"]?.ToString()).Where(s => !string.IsNullOrEmpty(s));
-                                resultContent = string.Join("\n", texts);
-                            }
-                            else
-                            {
-                                resultContent = toolResult.Content?.ToString() ?? T("执行成功", "Executed successfully");
-                            }
-                            Log(LogLevel.Info, T("执行结果：{0}", "Result: {0}", resultContent));
-                            operationCount++;
-
-                            toolResultMessages.Add(new JObject
-                            {
-                                ["role"] = "tool",
-                                ["tool_call_id"] = tc["id"].ToString(),
-                                ["content"] = resultContent
-                            });
+                            resultContent = _toolSelector.GetOverview();
+                            expandTools = true;   // 下一轮自动提供全部工具 schema，弱模型可直接调用
+                            metaOperationCount++;
+                            callMadeProgress = true;
+                            Log(LogLevel.Info, T("模型请求查看全部工具概述，下一轮将提供全部工具。", "Model requested the full tool overview; all tools will be provided next round."));
                         }
-                        catch (Exception ex)
+                        else if (toolName.Equals("get_tool_usage", StringComparison.OrdinalIgnoreCase) && _toolSelector != null)
                         {
-                            Log(LogLevel.Error, T("执行 {0} 失败：{1}", "Failed to execute {0}: {1}", toolName, ex.Message));
-                            toolResultMessages.Add(new JObject
+                            string tname = args["tool_name"]?.ToString() ?? "";
+                            resultContent = _toolSelector.GetUsage(tname)
+                                ?? T("未找到工具 {0}。请先调用 list_tools 查看全部工具名称。", "Tool {0} not found. Call list_tools first to see all tool names.", tname);
+                            metaOperationCount++;
+                            callMadeProgress = true;
+                            Log(LogLevel.Info, T("模型请求查看工具 {0} 的用法。", "Model requested usage of tool {0}.", tname));
+                        }
+                        else
+                        {
+                            Log(LogLevel.Success, T("正在执行：{0}，参数：{1}", "Executing: {0}, args: {1}", toolName, argsJson));
+                            try
+                            {
+                                var argsDict = args.ToObject<Dictionary<string, object?>>();
+                                var toolResult = await _mcpClient.CallToolAsync(toolName, argsDict);
+                                // Content 是 IList<ContentBlock>，文本内容在 TextContentBlock.Text 中
+                                var texts = (toolResult.Content ?? Array.Empty<ContentBlock>())
+                                    .OfType<TextContentBlock>()
+                                    .Select(c => c.Text)
+                                    .Where(s => !string.IsNullOrEmpty(s));
+                                resultContent = string.Join("\n", texts);
+                                if (string.IsNullOrEmpty(resultContent))
+                                {
+                                    resultContent = toolResult.IsError == true
+                                        ? T("执行失败（无详细输出）", "Execution failed (no detail output)")
+                                        : T("执行成功", "Executed successfully");
+                                }
+                                else if (toolResult.IsError == true)
+                                {
+                                    resultContent = T("[错误] {0}", "[Error] {0}", resultContent);
+                                }
+                                Log(LogLevel.Info, T("执行结果：{0}", "Result: {0}", resultContent));
+                                operationCount++;
+                            }
+                            catch (Exception ex)
+                            {
+                                Log(LogLevel.Error, T("执行 {0} 失败：{1}", "Failed to execute {0}: {1}", toolName, ex.Message));
+                                resultContent = T("错误：{0}", "Error: {0}", ex.Message);
+                            }
+                        }
+
+                        // 判断是否有效进展：非错误、非空、非空数组的结果才算数
+                        bool isMetaCall = toolName.Equals("list_tools", StringComparison.OrdinalIgnoreCase)
+                                       || toolName.Equals("get_tool_usage", StringComparison.OrdinalIgnoreCase);
+                        callMadeProgress = !resultContent.StartsWith("[错误]", StringComparison.Ordinal)
+                            && !resultContent.StartsWith("错误：", StringComparison.Ordinal)
+                            && !string.IsNullOrWhiteSpace(resultContent)
+                            && resultContent != "[]"
+                            && !resultContent.Equals(T("执行成功", "Executed successfully"), StringComparison.Ordinal);
+                        roundMadeProgress |= callMadeProgress;
+
+                        lastToolResult = resultContent;
+
+                        // 失败/错误的结果不发送给模型（避免模型被错误信息带偏、继续编造），仅记录日志
+                        if (resultContent.StartsWith("[错误]", StringComparison.Ordinal) || resultContent.StartsWith("错误：", StringComparison.Ordinal))
+                        {
+                            Log(LogLevel.Warning, T("操作 {0} 结果为错误，已过滤（不发送给模型）：{1}", "Result of {0} is an error; filtered (not sent to model): {1}", toolName, resultContent));
+                            continue;
+                        }
+
+                        // 收集成功操作摘要（结束时让模型据此生成一句话总结）
+                        if (callMadeProgress && !isMetaCall)
+                        {
+                            string brief = resultContent.Length > 160 ? resultContent.Substring(0, 160) + "…" : resultContent;
+                            successfulOps.Add($"- {toolName}: {brief}");
+                        }
+
+                        executedResults.Add((callId, toolName, resultContent));
+                    }
+
+                    // 将结果写入对话（错误结果已过滤；助手消息的 tool_calls 与结果一一对应）
+                    if (executedResults.Count == 0)
+                    {
+                        Log(LogLevel.Warning, T("本轮 {0} 个工具调用结果均为错误，已全部过滤，回合未写入对话。", "All {0} tool call(s) in this round returned errors and were filtered; the round was not written to the conversation.", pendingCalls.Count));
+                    }
+                    else
+                    {
+                        if (message["tool_calls"] is JArray tcArray && tcArray.Count > 0)
+                        {
+                            // OpenAI 格式：助手消息中的 tool_calls 必须与 tool 结果一一对应，重建仅保留有结果的调用
+                            var keptIds = new HashSet<string>(executedResults.Select(r => r.CallId), StringComparer.Ordinal);
+                            var keptCalls = new JArray();
+                            foreach (var tc in tcArray)
+                            {
+                                string tid = tc["id"]?.ToString();
+                                if (tid != null && keptIds.Contains(tid)) keptCalls.Add(tc);
+                            }
+                            if (keptCalls.Count > 0)
+                            {
+                                var assistantMsg = (JObject)message.DeepClone();
+                                assistantMsg["tool_calls"] = keptCalls;
+                                messages.Add(assistantMsg);
+                            }
+                        }
+                        else
+                        {
+                            // Claude 文本格式：助手消息原样加入
+                            messages.Add(message);
+                        }
+
+                        foreach (var (callId, toolName, resultContent) in executedResults)
+                        {
+                            messages.Add(new JObject
                             {
                                 ["role"] = "tool",
-                                ["tool_call_id"] = tc["id"].ToString(),
-                                ["content"] = T("错误：{0}", "Error: {0}", ex.Message)
+                                ["tool_call_id"] = callId,
+                                ["content"] = resultContent
                             });
                         }
                     }
 
-                    foreach (var tm in toolResultMessages)
-                        messages.Add(tm);
+                    // 防死循环：每 3 轮提醒模型尽快收尾
+                    roundCount++;
+                    if (roundCount >= 3 && roundCount % 3 == 0)
+                    {
+                        messages.Add(new JObject
+                        {
+                            ["role"] = "system",
+                            ["content"] = T(
+                                "提示：如果已经完成用户的请求，请立即给出最终文字回答，不要再调用工具。",
+                                "Reminder: if the user's request has been fulfilled, give a final text answer now and stop calling tools.")
+                        });
+                    }
+
+                    // 防死循环：连续多轮无有效结果 → 提醒一次并强制收尾（不再无谓地烧完所有轮次）
+                    if (!roundMadeProgress) noProgressRounds++;
+                    else noProgressRounds = 0;
+                    if (noProgressRounds == 2)
+                    {
+                        messages.Add(new JObject
+                        {
+                            ["role"] = "system",
+                            ["content"] = T(
+                                "工具调用连续未产生有效结果。请停止继续调用工具，直接基于已有信息回答用户；如果确实需要其他工具，请先调用 list_tools 确认工具名后再调用。",
+                                "Consecutive tool calls produced no useful result. Stop calling tools and answer the user directly based on existing information; if you truly need another tool, call list_tools first to confirm the name.")
+                        });
+                    }
+                    if (noProgressRounds >= 3)
+                    {
+                        Log(LogLevel.Warning, T("连续 {0} 轮无有效结果，强制结束工具循环。", "{0} consecutive rounds with no useful result; forcibly ending the tool loop.", noProgressRounds));
+                        string stopMsg = await BuildSummaryAsync(userInput, successfulOps);
+                        _context.AddMessage("user", userInput);
+                        _context.AddMessage("assistant", stopMsg);
+                        AnswerReceived?.Invoke(userInput, stopMsg);
+                        return stopMsg;
+                    }
 
                     continue;
                 }
@@ -861,8 +1195,13 @@ namespace LlamaChat
                     string finalMsg;
                     if (userCancelled)
                         finalMsg = T("操作已取消。", "Operation cancelled.");
+                    else if (!string.IsNullOrWhiteSpace(content)
+                             && !(_toolSelector != null && TryParseTextToolCall(content, _toolSelector.IsKnownTool, out _, out _)))
+                        finalMsg = content.Trim();   // 模型已基于工具结果给出自然总结（如“已为你打开记事本”）
                     else if (operationCount > 0)
                         finalMsg = T("已执行 {0} 个操作，任务完成。", "Executed {0} operation(s). Task complete.", operationCount);
+                    else if (metaOperationCount > 0)
+                        finalMsg = T("已查看工具信息，未执行实际操作。", "Tool info was viewed; no operations were actually executed.");
                     else
                         finalMsg = T("未执行任何操作，任务可能失败。", "No operations executed; the task may have failed.");
                     _context.AddMessage("user", userInput);
@@ -884,7 +1223,78 @@ namespace LlamaChat
                 }
             }
 
-            throw new Exception(T("工具调用循环超过最大次数，可能陷入死循环。", "Tool-call loop exceeded the maximum iteration count; possible infinite loop."));
+            // 循环次数用尽：让模型基于成功执行的操作生成一句话总结（不再展示原始错误结果）
+            string limitMsg = await BuildSummaryAsync(userInput, successfulOps);
+            _context.AddMessage("user", userInput);
+            _context.AddMessage("assistant", limitMsg);
+            AnswerReceived?.Invoke(userInput, limitMsg);
+            return limitMsg;
+        }
+
+        // ---- 工具循环结束时的总结：让模型基于成功执行的操作生成一句话总结 ----
+        // 原则：提示词简短；只发送成功操作的结果；错误结果一律不发给模型；
+        // 使用最小消息集（不含任何工具调用历史），避免模型继续输出工具调用格式。
+        private async Task<string> BuildSummaryAsync(string userInput, List<string> successfulOps)
+        {
+            var summaryMessages = new JArray();
+            summaryMessages.Add(new JObject { ["role"] = "user", ["content"] = userInput });
+
+            if (successfulOps.Count > 0)
+            {
+                summaryMessages.Add(new JObject
+                {
+                    ["role"] = "system",
+                    ["content"] = T(
+                        "工具调用已结束。请用一句话向用户总结你已成功执行的操作（不要提失败或错误，不要输出任何工具调用格式）。",
+                        "Tool calls are finished. Summarize in ONE sentence what you successfully did for the user (do not mention failures or errors, and do not output any tool-call format).")
+                });
+                summaryMessages.Add(new JObject
+                {
+                    ["role"] = "user",
+                    ["content"] = string.Join("\n", successfulOps)
+                });
+            }
+            else
+            {
+                summaryMessages.Add(new JObject
+                {
+                    ["role"] = "system",
+                    ["content"] = T(
+                        "工具调用已结束，未能完成用户请求。请用一句话向用户说明情况。",
+                        "Tool calls ended without completing the user's request. Explain the situation in one sentence.")
+                });
+            }
+
+            var requestBody = new JObject
+            {
+                ["messages"] = summaryMessages,
+                ["temperature"] = 0.5,
+                ["max_tokens"] = _options.MaxResponseTokens,
+                ["stream"] = false
+            };
+            try
+            {
+                var response = await PostChatCompletionAsync(requestBody);
+                string content = response["choices"]?[0]?["message"]?["content"]?.ToString() ?? "";
+                // 若模型仍输出工具调用格式，则回退到自拼总结
+                if (!string.IsNullOrWhiteSpace(content)
+                    && !(_toolSelector != null && TryParseTextToolCall(content, _toolSelector.IsKnownTool, out _, out _)))
+                    return content.Trim();
+            }
+            catch (Exception ex)
+            {
+                Log(LogLevel.Error, T("生成操作总结失败：{0}", "Failed to generate operation summary: {0}", ex.Message));
+            }
+
+            // 回退：自拼简洁总结（仅列出成功操作的工具名）
+            if (successfulOps.Count > 0)
+            {
+                var toolNames = successfulOps
+                    .Select(s => s.Trim().TrimStart('-').Trim().Split(':')[0].Trim())
+                    .ToList();
+                return T("已执行 {0} 个操作：{1}。", "Executed {0} operation(s): {1}.", successfulOps.Count, string.Join("、", toolNames));
+            }
+            return T("未能完成操作。", "Could not complete the operation.");
         }
 
         // ---- 释放资源 ----
@@ -1410,7 +1820,7 @@ namespace LlamaChat
 
             Console.Write("\x1b[38;2;252;255;175m");
             Console.WriteLine("Welcome to Lumina AI Core!");
-            Console.WriteLine("Build 5");
+            Console.WriteLine("Build 9");
             Console.WriteLine("");
 
 
