@@ -21,6 +21,12 @@
 
 ---
 
+## 演示视频
+
+https://github.com/user-attachments/assets/13d7b12d-a524-4139-a287-4145b8ba5d2b
+
+---
+
 ## 🚀 快速体验
 
 **只需三步：**
