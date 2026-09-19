@@ -30,7 +30,7 @@ https://github.com/user-attachments/assets/13d7b12d-a524-4139-a287-4145b8ba5d2b
 ## 🚀 快速体验
 
 **只需三步：**
-1. 下载最新 [Release](https://github.com/Happy-380/Lumina-AI-Core/releases) 中的 `bin.zip.001` 和 `bin.zip.002`
+1. 下载最新 [Release](https://github.com/Happy-380/Lumina-AI-Core/releases) 中的 `bin.zip` 和 `bin.z01`
 2. 解压并双击 `Lumina-AI.exe`
 3. 在控制台输入你的问题
 
