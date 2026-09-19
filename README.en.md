@@ -30,7 +30,7 @@ https://github.com/user-attachments/assets/13d7b12d-a524-4139-a287-4145b8ba5d2b
 ## 🚀 Quick Start
 
 **Just three steps:**
-1. Download `bin.zip.001` and `bin.zip.002` from the latest [Release](https://github.com/Happy-380/Lumina-AI-Core/releases)
+1. Download `bin.zip` and `bin.z01` from the latest [Release](https://github.com/Happy-380/Lumina-AI-Core/releases)
 2. Unzip and double-click `Lumina-AI.exe`
 3. Type your question in the console
 
