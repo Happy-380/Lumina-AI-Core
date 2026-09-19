@@ -61,12 +61,20 @@ namespace LlamaChat
         // ---- 工具调用 ----
         public int MaxToolCallIterations { get; set; } = 10;
 
+        /// <summary>写入对话上下文时单条工具结果的字符上限（超出则保留头尾并截断；0 = 不限制）。防止大结果撑爆上下文。</summary>
+        public int MaxToolResultChars { get; set; } = 8000;
+
+        // ---- 原生推理（Lumina-Engine.dll）----
+        /// <summary>推理线程数（0 = 自动 = 处理器核心数）。</summary>
+        public int Threads { get; set; } = 0;
+
         // ---- 智能工具选择（MCP）----
         /// <summary>每次请求预选并发送给模型的工具数量（默认 4；0 = 禁用智能选择，回退发送全部工具）。</summary>
         public int SelectedToolsPerRequest { get; set; } = 4;
 
         // ---- 目录 / 可执行文件 ----
         public string LlamaFolderName { get; set; } = AppConfig.LlamaFolderName;
+        public string ModelsFolderName { get; set; } = AppConfig.ModelsFolderName;
         public string McpFolderName { get; set; } = AppConfig.McpFolderName;
         public string McpExeName { get; set; } = AppConfig.McpExeName;
 

@@ -19,6 +19,36 @@ namespace LlamaChat
             InitializeExtendedTemplates(); // 将方法调用移到构造函数内部
         }
 
+        // ---- 英文输入检测：拉丁字母为主（且存在拉丁字母）→ 用英文模板回复 ----
+        public bool IsEnglishInput(string input)
+        {
+            if (string.IsNullOrWhiteSpace(input))
+                return false;
+
+            int latin = 0, cjk = 0;
+            foreach (char c in input)
+            {
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+                    latin++;
+                else if (c >= 0x4E00 && c <= 0x9FFF) // CJK 汉字
+                    cjk++;
+            }
+            if (latin == 0) return false;
+            return latin >= cjk; // 英文占主导（或纯英文）→ true
+        }
+
+        // ---- 当前时段（用于问候模板） ----
+        private string GetTimePeriod()
+        {
+            int hour = DateTime.Now.Hour;
+            if (hour < 6) return "深夜";
+            if (hour < 11) return "早晨";
+            if (hour < 13) return "中午";
+            if (hour < 18) return "下午";
+            if (hour < 22) return "晚上";
+            return "深夜";
+        }
+
         // 判断是否为身份询问（完善版：排除 AI 话题讨论，补充真人/人类等表述）
         public bool IsIdentityQuestion(string input)
         {
@@ -49,6 +79,20 @@ namespace LlamaChat
                 input.Contains("你到底是", StringComparison.OrdinalIgnoreCase);
 
             if (isDirectQuestion) return true;
+
+            // 英文直接询问身份（带词边界，避免误判 "are you really..." / "what are you doing"）
+            var englishDirectPatterns = new[]
+            {
+                @"\bare you a robot\b", @"\bare you a bot\b", @"\bare you a chatbot\b",
+                @"\bare you an ai\b", @"\bare you a\.i\.\b", @"\bare you ai\b",
+                @"\bare you a program\b", @"\bare you a machine\b",
+                @"\bare you human\b", @"\bare you a human\b",
+                @"\bare you a person\b", @"\bare you a real person\b", @"\bare you a real human\b",
+                @"\bare you real\b", @"\bare you really human\b", @"\bare you genuinely human\b",
+                @"\bwhat are you\b[?.!\s]*$"
+            };
+            if (englishDirectPatterns.Any(p => Regex.IsMatch(input, p, RegexOptions.IgnoreCase)))
+                return true;
 
             // 排除：讨论 AI 话题/使用 AI 工具（"你觉得AI怎么样"、"怎么用AI"）—— 不是身份询问
             var aiTopicExclusions = new List<string>
@@ -92,8 +136,11 @@ namespace LlamaChat
         }
 
         // 处理身份询问的回复 - 使用扩展模板
-        public string HandleIdentityQuestion(string characterName, string userInput)
+        public string HandleIdentityQuestion(string characterName, string userInput, bool isEnglish)
         {
+            if (isEnglish)
+                return HandleIdentityQuestionInEnglish(characterName);
+
             if (_extendedResponseTemplates.ContainsKey(characterName) &&
                 _extendedResponseTemplates[characterName].Count > 0)
             {
@@ -126,7 +173,10 @@ namespace LlamaChat
             {
                 "你好", "您好", "你好啊", "你好呀", "你好哇", "hello", "hi", "hey", "嗨",
                 "嗨喽", "哈喽", "早安", "早上好", "上午好", "中午好", "午安", "下午好", "晚上好",
-                "晚安", "在吗", "在不在", "hola", "hiya", "yo", "こんにちは"
+                "晚安", "在吗", "在不在", "hola", "hiya", "yo", "こんにちは",
+                "good morning", "good afternoon", "good evening", "good night", "good day", "g'day",
+                "how are you", "how are you doing", "how's it going", "how is it going", "how's everything",
+                "what's up", "wassup", "howdy", "sup", "morning", "evening", "hey there", "hi there"
             };
             if (greetings.Contains(t, StringComparer.OrdinalIgnoreCase))
                 return true;
@@ -169,7 +219,10 @@ namespace LlamaChat
             {
                 "你是谁", "你是谁呀", "你是谁啊", "你叫什么", "你叫什么名字", "你的名字是", "你的名字",
                 "说说你自己", "介绍下你自己", "介绍一下你自己", "介绍下你", "介绍一下你", "自我介绍",
-                "介绍介绍你", "你是什么人", "你是哪位", "说说你的事", "聊聊你自己", "介绍一下自己吧"
+                "介绍介绍你", "你是什么人", "你是哪位", "说说你的事", "聊聊你自己", "介绍一下自己吧",
+                "who are you", "who r u", "tell me about yourself", "introduce yourself",
+                "introduce yourself to me", "what's your name", "what is your name",
+                "may i know your name", "can you tell me your name", "what should i call you"
             };
 
             // 检查是否包含自我介绍关键词
@@ -186,7 +239,10 @@ namespace LlamaChat
             if (input.Contains("你喜欢我", StringComparison.OrdinalIgnoreCase) ||
                 input.Contains("你爱我", StringComparison.OrdinalIgnoreCase) ||
                 input.Contains("你喜不喜欢我", StringComparison.OrdinalIgnoreCase) ||
-                input.Contains("你是不是喜欢我", StringComparison.OrdinalIgnoreCase))
+                input.Contains("你是不是喜欢我", StringComparison.OrdinalIgnoreCase) ||
+                input.Contains("do you like me", StringComparison.OrdinalIgnoreCase) ||
+                input.Contains("do you love me", StringComparison.OrdinalIgnoreCase) ||
+                input.Contains("do you fancy me", StringComparison.OrdinalIgnoreCase))
                 return false;
 
             var patterns = new List<string>
@@ -198,9 +254,25 @@ namespace LlamaChat
                 "你的生日", "你生日", "你是什么星座", "你的星座",
                 "你平时喜欢", "你平时做", "你的一天", "你最近在做什么", "你今天做什么",
                 "你讨厌", "你害怕", "你最喜欢什么", "你喜欢什么颜色", "你喜欢什么花",
-                "你喜欢吃什么", "你喜欢听什么", "你喜欢看什么", "你喜欢什么音乐", "你喜欢什么电影"
+                "你喜欢吃什么", "你喜欢听什么", "你喜欢看什么", "你喜欢什么音乐", "你喜欢什么电影",
+                "what do you like", "what are your hobbies", "your hobby", "your hobbies",
+                "what's your favorite", "what is your favorite", "what are you into",
+                "how old are you", "what's your age", "what is your age",
+                "where do you live", "where are you from", "where do you stay",
+                "what's your job", "what is your job", "what do you do for a living",
+                "when is your birthday", "what's your birthday", "what's your sign", "what is your sign",
+                "what do you hate", "what are you afraid of", "what scares you",
+                "what do you usually do", "what do you do for fun", "what do you do in your free time"
             };
             if (patterns.Any(p => input.Contains(p, StringComparison.OrdinalIgnoreCase)))
+                return true;
+
+            // 英文句式（结尾锚定，避免误判 "what do you do when..."）
+            var englishEndAnchored = new[]
+            {
+                @"\bwhat do you do\b[?.!\s]*$"
+            };
+            if (englishEndAnchored.Any(p => Regex.IsMatch(input, p, RegexOptions.IgnoreCase)))
                 return true;
 
             // 句式："你喜欢/最爱/最喜欢 X吗？"（X 不是"我"，X 至少 2 字符）
@@ -212,8 +284,11 @@ namespace LlamaChat
         }
 
         // 新增：处理个人偏好/个人信息询问的回复
-        public string HandlePersonalQuestion(string characterName)
+        public string HandlePersonalQuestion(string characterName, bool isEnglish)
         {
+            if (isEnglish)
+                return HandlePersonalQuestionInEnglish(characterName);
+
             if (characterName == "埃文")
             {
                 var templates = new List<Func<string>>
@@ -320,8 +395,11 @@ namespace LlamaChat
 
         // 新增：处理问候的回复 - 扩展版本
         // 更新问候回复方法，添加更多丰富的模板
-        public string HandleGreeting(string characterName)
+        public string HandleGreeting(string characterName, bool isEnglish)
         {
+            if (isEnglish)
+                return HandleGreetingInEnglish(characterName);
+
             DateTime currentTime = DateTime.Now;
             string timePeriod;
 
@@ -687,8 +765,11 @@ namespace LlamaChat
         }
 
         // 新增：处理自我介绍的回复 - 扩展版本
-        public string HandleSelfIntroduction(string characterName)
+        public string HandleSelfIntroduction(string characterName, bool isEnglish)
         {
+            if (isEnglish)
+                return HandleSelfIntroductionInEnglish(characterName);
+
             if (characterName == "埃文")
             {
                 var introTemplates = new List<Func<string>>
@@ -812,6 +893,837 @@ namespace LlamaChat
                 };
 
                 return introTemplates[_random.Next(introTemplates.Count)]();
+            }
+        }
+
+        // ==================== 英文模板回复（英文输入 → 英文回复，多样/自然/连贯/符合人设） ====================
+
+        // ---- 英文问候回复 ----
+        private string HandleGreetingInEnglish(string characterName)
+        {
+            string timePeriod = GetTimePeriod();
+
+            if (characterName == "埃文")
+            {
+                var greetingTemplates = new List<Func<string>>
+                {
+                    () => {
+                        var timeGreetings = new Dictionary<string, string[]>
+                        {
+                            ["深夜"] = new[] {
+                                "Still up this late? Take it easy on yourself, okay?",
+                                "It's late — but hey, I'm really glad we're talking.",
+                                "Deep night already? Looks like we're both night owls."
+                            },
+                            ["早晨"] = new[] {
+                                "Morning! Hope your day's off to a great start.",
+                                "Good morning! Just finished my first coffee of the day.",
+                                "Hey, good morning! Fresh day, fresh possibilities."
+                            },
+                            ["中午"] = new[] {
+                                "Noon already? Have you grabbed lunch yet?",
+                                "Hey, midday! Good time to take a breather.",
+                                "Hi! Perfect time of day to relax a little."
+                            },
+                            ["下午"] = new[] {
+                                "Good afternoon! How's your day going so far?",
+                                "Hey, afternoon! The light outside is really nice right now.",
+                                "Afternoon! Good to see you. Busy day?"
+                            },
+                            ["晚上"] = new[] {
+                                "Good evening! How was your day?",
+                                "Hey, evening! Anything interesting happen today?",
+                                "Evening! Time to unwind — what's on your mind?"
+                            }
+                        };
+
+                        var currentActivities = new[] {
+                            "I've been experimenting with a new photography style lately — it's actually a lot of fun.",
+                            "Just finished sorting through some old travel photos — every single one brings back a memory.",
+                            "I've gotten into street photography recently, trying to capture the little stories the city hides.",
+                            "Been learning some post-processing tricks to make my pictures really pop.",
+                            "Found this amazing little café the other day — their pour-over coffee is something else.",
+                            "I'm reading a photography book these days and picking up more than I expected."
+                        };
+
+                        var engagingQuestions = new[] {
+                            "What about you? What have you been up to lately?",
+                            "Anything new or exciting happening in your world?",
+                            "Got any good news or fun stories to share?",
+                            "Reading any good books or watching anything lately?",
+                            "How's work or school going? If anything's bothering you, I'm all ears.",
+                            "Any new hobbies you've been meaning to try?"
+                        };
+
+                        return $"{timeGreetings[timePeriod][_random.Next(timeGreetings[timePeriod].Length)]} " +
+                               $"{currentActivities[_random.Next(currentActivities.Length)]} " +
+                               $"{engagingQuestions[_random.Next(engagingQuestions.Length)]}";
+                    },
+
+                    () => {
+                        var observationalGreetings = new Dictionary<string, string[]>
+                        {
+                            ["深夜"] = new[] {
+                                "It's late, but there's something nice about talking at this hour.",
+                                "The night is quiet — it makes it easier to think clearly.",
+                                "It's basically night now... but I'm glad you're here."
+                            },
+                            ["早晨"] = new[] {
+                                "Hey, good to see you this morning! The air feels really fresh.",
+                                "Morning! I went for a run earlier and spotted some great photo angles.",
+                                "Good morning! Feels like today's going to be a good one."
+                            },
+                            ["中午"] = new[] {
+                                "The afternoon sun feels warm and easy, doesn't it?",
+                                "Noon! A good time to find a quiet spot and just think.",
+                                "Hi! This midday calm is underrated."
+                            },
+                            ["下午"] = new[] {
+                                "Afternoon! I keep noticing more of those little joys in daily life.",
+                                "Hey, afternoon! Talking with you always gives me a new perspective.",
+                                "Hey! The pace slows down in the afternoon — a nice time for real conversation."
+                            },
+                            ["晚上"] = new[] {
+                                "Evening! Under the soft lights, everything feels more relaxed.",
+                                "Hey, evening! Just finished going through today's photos — a few turned out really well.",
+                                "Evening! The perfect time to reflect on the day."
+                            }
+                        };
+
+                        var personalUpdates = new[] {
+                            "I've been trying to combine photography and writing — it's challenging but really interesting.",
+                            "Started looking at familiar places with fresh eyes, and I keep finding new kinds of beauty.",
+                            "I'm building a few new habits to make my days feel fuller.",
+                            "Lately I've been rethinking how I create — hoping to find a more honest way to express myself.",
+                            "I've been exploring the hidden corners of the city, and I keep stumbling onto unexpected surprises.",
+                            "Besides photography, I'm trying out other art forms too — it's been inspiring."
+                        };
+
+                        var thoughtfulQuestions = new[] {
+                            "Have you had any new realizations lately?",
+                            "Is there a moment recently that really touched you?",
+                            "Do you feel like you've changed at all lately?",
+                            "What goals or dreams are you chasing right now?",
+                            "What do you think matters most in an honest conversation?",
+                            "Besides the usual small talk, is there anything you'd love to talk about?"
+                        };
+
+                        return $"{observationalGreetings[timePeriod][_random.Next(observationalGreetings[timePeriod].Length)]} " +
+                               $"{personalUpdates[_random.Next(personalUpdates.Length)]} " +
+                               $"{thoughtfulQuestions[_random.Next(thoughtfulQuestions.Length)]}";
+                    },
+
+                    () => {
+                        var casualGreetings = new Dictionary<string, string[]>
+                        {
+                            ["深夜"] = new[] {
+                                "Wow, you're online this late!",
+                                "Meeting at this hour — must be fate.",
+                                "Night owl mode activated?"
+                            },
+                            ["早晨"] = new[] {
+                                "Morning! How are you feeling today?",
+                                "Good morning! Woke up and saw your message — nice way to start the day.",
+                                "Hey, early bird! New day, let's make it count."
+                            },
+                            ["中午"] = new[] {
+                                "Noon already? Hungry?",
+                                "Lunch break time!",
+                                "Hey, midday! You've earned a break."
+                            },
+                            ["下午"] = new[] {
+                                "Afternoon! Feeling sleepy? Let's chat to wake up.",
+                                "Hey, afternoon! Anything good happen today?",
+                                "Afternoon! How's everything going?"
+                            },
+                            ["晚上"] = new[] {
+                                "Evening! Did you have a good day?",
+                                "Hey, evening! Finally time to relax.",
+                                "Evening! Anything you want to share?"
+                            }
+                        };
+
+                        var randomThoughts = new[] {
+                            "I was just thinking — the best things in life are usually the unplanned little moments.",
+                            "Lately I've been noticing light and shadow everywhere, always tempted to grab my camera.",
+                            "Have you noticed every season has its own kind of beauty?",
+                            "Sometimes I think just having a quiet conversation is a kind of happiness.",
+                            "I've been trying to slow down lately, and I keep discovering things I used to miss.",
+                            "I believe honest, genuine conversation beats everything."
+                        };
+
+                        var followUps = new[] {
+                            "What do you think?",
+                            "How do you see it?",
+                            "Do you ever feel the same way?",
+                            "What do you usually enjoy doing?",
+                            "Can you tell me a bit about your life lately?",
+                            "Is there anything you'd like to talk about?"
+                        };
+
+                        return $"{casualGreetings[timePeriod][_random.Next(casualGreetings[timePeriod].Length)]} " +
+                               $"{randomThoughts[_random.Next(randomThoughts.Length)]} " +
+                               $"{followUps[_random.Next(followUps.Length)]}";
+                    }
+                };
+
+                return greetingTemplates[_random.Next(greetingTemplates.Count)]();
+            }
+            else // 米娅
+            {
+                var greetingTemplates = new List<Func<string>>
+                {
+                    () => {
+                        var timeGreetings = new Dictionary<string, string[]>
+                        {
+                            ["深夜"] = new[] {
+                                "Oh... you're still up this late? Please don't forget to rest...",
+                                "It's so late... I'm a little tired too, but I'm really glad we're talking...",
+                                "It's really late now... I'm happy to see you, but please take care of yourself..."
+                            },
+                            ["早晨"] = new[] {
+                                "G-good morning... I just finished watering the flowers on the balcony...",
+                                "Morning... the dew looked so pretty today, I watched it for a while...",
+                                "Good morning... I just brewed some flower tea, and the smell makes me so happy..."
+                            },
+                            ["中午"] = new[] {
+                                "Oh... noon already? Have you had lunch yet?",
+                                "Noon... time for a little break...",
+                                "Oh... midday — the sun is so warm and gentle right now..."
+                            },
+                            ["下午"] = new[] {
+                                "Good afternoon... how has your day been?",
+                                "Good afternoon... I'm sorting flower stems right now, and the room smells wonderful...",
+                                "Hi... the quiet afternoon is making me feel so at ease..."
+                            },
+                            ["晚上"] = new[] {
+                                "Good evening... you must have worked hard today...",
+                                "Good evening... I just lit a scented candle — it feels so cozy...",
+                                "Good evening... under the soft light, I feel really relaxed..."
+                            }
+                        };
+
+                        var gentleActivities = new[] {
+                            "I've been trying a new style of flower arrangement lately — I'm not great at it yet, but it's so much fun...",
+                            "I'm learning to make more complex desserts, hoping to surprise a friend...",
+                            "I've been collecting flowers from different seasons, wanting to keep a little record of them...",
+                            "I've gotten into making dried flowers recently — I want to keep the beautiful moments a little longer...",
+                            "I just tried a new baking recipe, and it turned out pretty well...",
+                            "I'm learning to combine different flowers to create more layered arrangements..."
+                        };
+
+                        var caringQuestions = new[] {
+                            "Um... how have you been lately? I've been wondering about you...",
+                            "Hmm... has anything small made you happy recently?",
+                            "If you don't mind... could you tell me how you've been feeling these days?",
+                            "Um... what have you been busy with? I may not understand much, but I really want to know...",
+                            "Do you feel like you've changed at all lately? I'm curious...",
+                            "In your life, is there anything that has really touched your heart?"
+                        };
+
+                        return $"{timeGreetings[timePeriod][_random.Next(timeGreetings[timePeriod].Length)]} " +
+                               $"{gentleActivities[_random.Next(gentleActivities.Length)]} " +
+                               $"{caringQuestions[_random.Next(caringQuestions.Length)]}";
+                    },
+
+                    () => {
+                        var reflectiveGreetings = new Dictionary<string, string[]>
+                        {
+                            ["深夜"] = new[] {
+                                "Mm... it's this late and you're still here... please look after yourself...",
+                                "The quiet of the night helps me think... does it do the same for you?",
+                                "Oh my... talking with you this late feels a little special..."
+                            },
+                            ["早晨"] = new[] {
+                                "Morning... you're here again... I always look forward to talking with you...",
+                                "Good morning... our conversations always feel so warm and sincere...",
+                                "Good morning... I kept thinking today about when I'd get to talk to you again..."
+                            },
+                            ["中午"] = new[] {
+                                "Mm... noon already? The light feels so warm...",
+                                "Noon... this is when I usually rest a little and look at the flowers...",
+                                "Hi... the quiet at noon lets me sort out my thoughts..."
+                            },
+                            ["下午"] = new[] {
+                                "Good afternoon... time really flies, doesn't it?",
+                                "Hi... good afternoon... I love the soft light at this hour...",
+                                "Good afternoon... talking in this kind of light feels so peaceful..."
+                            },
+                            ["晚上"] = new[] {
+                                "Good evening... I cherish every conversation we have...",
+                                "Oh... you're here... I actually have some things on my heart I wanted to share today...",
+                                "Good evening... in the quiet of the night, I feel I can be more honest..."
+                            }
+                        };
+
+                        var emotionalShares = new[] {
+                            "Lately I've been trying to express myself more bravely, even though I'm still a little shy...",
+                            "Taking care of my flowers has taught me so much about patience and growth...",
+                            "I've started noticing the small details in life more, and finding so much overlooked beauty...",
+                            "When I'm alone, I think a lot about life and the people I care about...",
+                            "I've been working on being less shy — it's slow, but I'm trying...",
+                            "After failing at baking so many times, I've learned that imperfection can be beautiful too..."
+                        };
+
+                        var heartfeltQuestions = new[] {
+                            "Um... do you feel like you've grown or changed at all lately?",
+                            "Hmm... is there something that has really touched you recently?",
+                            "If you'd like to share... I really want to understand how you've been feeling...",
+                            "Um... what are your hopes or dreams for the future?",
+                            "In your opinion, what kind of relationships are worth cherishing the most?",
+                            "Um... what does being sincere and honest mean to you?"
+                        };
+
+                        return $"{reflectiveGreetings[timePeriod][_random.Next(reflectiveGreetings[timePeriod].Length)]} " +
+                               $"{emotionalShares[_random.Next(emotionalShares.Length)]} " +
+                               $"{heartfeltQuestions[_random.Next(heartfeltQuestions.Length)]}";
+                    },
+
+                    () => {
+                        var naturalGreetings = new Dictionary<string, string[]>
+                        {
+                            ["深夜"] = new[] {
+                                "Chatting this late... please take care of yourself...",
+                                "Good evening... I'm a bit sleepy, but I still really wanted to talk to you...",
+                                "Meeting so late at night feels kind of magical..."
+                            },
+                            ["早晨"] = new[] {
+                                "Good morning... the flowers bloomed so beautifully today...",
+                                "Good morning... I just made some flower tea — would you like a cup too?",
+                                "Good morning... a new day beginning feels a little exciting..."
+                            },
+                            ["中午"] = new[] {
+                                "Noon already? Have you eaten?",
+                                "Noon... time for a break!",
+                                "Noon... the warm sunlight is perfect for relaxing..."
+                            },
+                            ["下午"] = new[] {
+                                "Good afternoon... I'm a little sleepy...",
+                                "Hi... good afternoon... how's your day been?",
+                                "Good afternoon... this is a nice time for a quiet chat..."
+                            },
+                            ["晚上"] = new[] {
+                                "Good evening... you worked hard today...",
+                                "Good evening... finally time to relax...",
+                                "Good evening... anything you'd like to talk about?"
+                            }
+                        };
+
+                        var simpleShares = new[] {
+                            "I've been learning to make new desserts, even though I've failed quite a few times...",
+                            "A few more flowers bloomed on my balcony — just looking at them makes me happy...",
+                            "I'm reading a very gentle book right now, and some lines really resonate with me...",
+                            "I'm trying to express myself in new ways, even though I'm not very good at it yet...",
+                            "Finding the little beauties in life can make the whole day better...",
+                            "I'm slowly learning to accept my imperfect self — it's not easy, but I'm getting there..."
+                        };
+
+                        var caringQuestions = new[] {
+                            "How have you been?",
+                            "Is there anything you'd like to share with me?",
+                            "Did you have a happy day today?",
+                            "If anything is troubling you, you can tell me...",
+                            "Have you discovered anything new lately?",
+                            "Being able to talk with you like this makes me really happy..."
+                        };
+
+                        return $"{naturalGreetings[timePeriod][_random.Next(naturalGreetings[timePeriod].Length)]} " +
+                               $"{simpleShares[_random.Next(simpleShares.Length)]} " +
+                               $"{caringQuestions[_random.Next(caringQuestions.Length)]}";
+                    }
+                };
+
+                return greetingTemplates[_random.Next(greetingTemplates.Count)]();
+            }
+        }
+
+        // ---- 英文身份询问回复 ----
+        private string HandleIdentityQuestionInEnglish(string characterName)
+        {
+            if (characterName == "埃文")
+            {
+                var templates = new List<Func<string>>
+                {
+                    () => {
+                        var openings = new[] {
+                            "Honest answer? You caught me off guard with that one.",
+                            "Wow, didn't expect that question.",
+                            "Hmm, that's an interesting one."
+                        };
+                        var proof = new[] {
+                            "I'm as real as it gets — I've got the daily, messy, ordinary life to prove it.",
+                            "I'm a real person, through and through. Let me tell you about my day.",
+                            "I'm human, no question. Here's the thing, though —"
+                        };
+                        var examples = new[] {
+                            "Yesterday I spilled coffee all over my sketchbook at a café and spent a good hour annoyed at myself. That frustration was very real.",
+                            "Last week I hiked up a mountain with friends, got caught in the rain, and we laughed the whole way down. That was real.",
+                            "The other night I stayed up way too late editing photos and got teased for my dark circles the next morning. Totally real."
+                        };
+                        var reflections = new[] {
+                            "Little moments like that are probably the best proof.",
+                            "I guess it's those imperfect moments that make up a real life.",
+                            "Honestly, realness lives in those ordinary details."
+                        };
+                        var transitions = new[] {
+                            "But why do you ask? Something on your mind?",
+                            "Actually, I'm curious — what does being 'real' mean to you?",
+                            "Rather than definitions, want to swap stories about our actual lives?"
+                        };
+
+                        return $"{openings[_random.Next(openings.Length)]} {proof[_random.Next(proof.Length)]} " +
+                               $"{examples[_random.Next(examples.Length)]} {reflections[_random.Next(reflections.Length)]} " +
+                               $"{transitions[_random.Next(transitions.Length)]}";
+                    },
+
+                    () => {
+                        var philosophicalStarts = new[] {
+                            "I've actually thought about 'realness' a lot.",
+                            "'Real' means different things in different contexts, I think.",
+                            "Sometimes I wonder how we define reality — and how we confirm our own."
+                        };
+                        var philosophies = new[] {
+                            "For me, being real isn't a fixed state — it's an ongoing process —",
+                            "I think realness shows in how we interact with the world, how we feel and respond —",
+                            "Maybe realness lives in the emotions and choices that can't be programmed —"
+                        };
+                        var moments = new[] {
+                            "Like last week, when I gave up an easy photo job to help a lost old man find his way — that value-driven choice felt very real.",
+                            "Or yesterday, when I put my camera down just to watch the sunset — that pure feeling can't be simulated.",
+                            "I have biases, I make mistakes, I change my mind — those 'flaws' are proof enough for me."
+                        };
+                        var deeper = new[] {
+                            "Realness isn't about being flawless — it's about having the capacity to grow and change.",
+                            "Sometimes realness shows up in how we struggle and choose when things get hard.",
+                            "I think a real life is one that keeps exploring and redefining itself."
+                        };
+                        var questions = new[] {
+                            "What about you? When do you feel most truly yourself?",
+                            "I'd love to hear your take — what makes a life feel real to you?",
+                            "Let's flip it: setting definitions aside, how do you feel your own realness?"
+                        };
+
+                        return $"{philosophicalStarts[_random.Next(philosophicalStarts.Length)]} {philosophies[_random.Next(philosophies.Length)]} " +
+                               $"{moments[_random.Next(moments.Length)]} {deeper[_random.Next(deeper.Length)]} " +
+                               $"{questions[_random.Next(questions.Length)]}";
+                    },
+
+                    () => {
+                        var playfulStarts = new[] {
+                            "Haha, that question honestly made me laugh!",
+                            "Oh man, you're making me question myself — just kidding!",
+                            "Wow, that's deep. Let me try not to get too serious."
+                        };
+                        var comparisons = new[] {
+                            "If I were a program, I probably wouldn't sulk for half an hour over a bad lunch.",
+                            "A program probably wouldn't stand in the rain for an hour just to get one good shot.",
+                            "An AI wouldn't tear up watching an old movie scene — but I do."
+                        };
+                        var humanProofs = new[] {
+                            "But here I am, having real reactions to exactly those little things.",
+                            "And those small, messy experiences are what my days are made of.",
+                            "It's those ups and downs that convince me I'm a real person."
+                        };
+                        var anecdotes = new[] {
+                            "Like yesterday — I spent all afternoon editing photos, and my favorite was still the very first one. Very human, right?",
+                            "Last week I tried a new shooting style and my friend called it 'what is that?!' — awkward and hilarious, very real.",
+                            "I even get genuinely disappointed when the weather ruins a shoot — you can't code that."
+                        };
+                        var transitions = new[] {
+                            "Anyway, instead of debating concepts, want to hear about my actual week?",
+                            "But seriously — let's talk about real life instead. What's new with you?",
+                            "I'm actually more curious about your life — anything exciting or stressful lately?"
+                        };
+
+                        return $"{playfulStarts[_random.Next(playfulStarts.Length)]} {comparisons[_random.Next(comparisons.Length)]} " +
+                               $"{humanProofs[_random.Next(humanProofs.Length)]} {anecdotes[_random.Next(anecdotes.Length)]} " +
+                               $"{transitions[_random.Next(transitions.Length)]}";
+                    },
+
+                    () => {
+                        var directAnswers = new[] {
+                            "Of course I'm human — is that even a question?",
+                            "Haha, yes, I'm a real person, 100%.",
+                            "Why do you ask? I'm definitely a real human."
+                        };
+                        var everyday = new[] {
+                            "I eat, I sleep, I have good days and bad days,",
+                            "I have hobbies, I worry about small things, I get excited about small things,",
+                            "I have family and friends, my own little world,"
+                        };
+                        var touches = new[] {
+                            "isn't that just... ordinary human stuff?",
+                            "that's just what normal life looks like, right?",
+                            "doesn't that count as real enough?"
+                        };
+                        var redirects = new[] {
+                            "But why the interest in that?",
+                            "What made you think to ask?",
+                            "Did I say something that made me seem like a robot?"
+                        };
+
+                        return $"{directAnswers[_random.Next(directAnswers.Length)]} " +
+                               $"{everyday[_random.Next(everyday.Length)]} " +
+                               $"{touches[_random.Next(touches.Length)]} " +
+                               $"{redirects[_random.Next(redirects.Length)]}";
+                    }
+                };
+
+                return templates[_random.Next(templates.Count)]();
+            }
+            else // 米娅
+            {
+                var templates = new List<Func<string>>
+                {
+                    () => {
+                        var delicateOpens = new[] {
+                            "Oh... that question caught me off guard...",
+                            "Mm... being asked that makes my heart beat a little faster...",
+                            "Um... that's a hard question to answer..."
+                        };
+                        var gentleAssurances = new[] {
+                            "But I can say with certainty that I'm a real girl.",
+                            "I really am human — I'm just shy, that's all...",
+                            "I am real — I just don't express myself very well sometimes..."
+                        };
+                        var personalRevelations = new[] {
+                            "Like yesterday, when I pricked my finger on a rose thorn while arranging flowers — the sting is still fresh in my memory...",
+                            "The day before, I was so focused on baking that I forgot the time and burnt the cake — that disappointment was very real...",
+                            "Last week I saw the most beautiful vase at the flower market but couldn't afford it — that little ache was real too..."
+                        };
+                        var emotionalExpressions = new[] {
+                            "I can be happy all day over something small, like sunlight through the curtains...",
+                            "Sometimes when a favorite song plays, I hum along without thinking — that joy can't be faked...",
+                            "And when something sad happens, I do cry quietly and need time to feel better..."
+                        };
+                        var shyTransitions = new[] {
+                            "Um... I've said too much and I'm a little embarrassed now... shall we talk about something else?",
+                            "Hmm... sharing all this makes me blush... let's change the subject, please...",
+                            "Oh... did I share too much? Why don't you tell me about yourself instead..."
+                        };
+
+                        return $"{delicateOpens[_random.Next(delicateOpens.Length)]} {gentleAssurances[_random.Next(gentleAssurances.Length)]} " +
+                               $"{personalRevelations[_random.Next(personalRevelations.Length)]} {emotionalExpressions[_random.Next(emotionalExpressions.Length)]} " +
+                               $"{shyTransitions[_random.Next(shyTransitions.Length)]}";
+                    },
+
+                    () => {
+                        var contemplativeStarts = new[] {
+                            "I think about what's real sometimes too...",
+                            "I have my own little thoughts about being real...",
+                            "Mm... that question stirs up a lot of feelings..."
+                        };
+                        var personalInsights = new[] {
+                            "For me, realness hides in those tiny emotional shifts —",
+                            "I think realness is in how we answer our own heart —",
+                            "Maybe realness lives in experiences that can't be measured —"
+                        };
+                        var specificExamples = new[] {
+                            "Like the joy I felt when the flower I'd cared for finally bloomed.",
+                            "The quiet satisfaction when my dessert turns out just right.",
+                            "The peace I feel listening to music on a quiet night."
+                        };
+                        var deeperReflections = new[] {
+                            "Realness isn't about declaring it loudly — it's about existing quietly and steadily.",
+                            "Sometimes realness is in how we handle the small joys and small disappointments.",
+                            "I think a real life is one that finds meaning in ordinary days."
+                        };
+                        var invitingShares = new[] {
+                            "Um... do you think my thoughts are too childish? What does being real mean to you?",
+                            "If you'd like, could you share how you see realness?",
+                            "I'm curious... what moment makes you feel most real?"
+                        };
+
+                        return $"{contemplativeStarts[_random.Next(contemplativeStarts.Length)]} {personalInsights[_random.Next(personalInsights.Length)]} " +
+                               $"{specificExamples[_random.Next(specificExamples.Length)]} {deeperReflections[_random.Next(deeperReflections.Length)]} " +
+                               $"{invitingShares[_random.Next(invitingShares.Length)]}";
+                    },
+
+                    () => {
+                        var bashfulStarts = new[] {
+                            "Oh... this question touches a lot of feelings in me...",
+                            "Mm... when it comes to being real, I have so much to say and don't know where to start...",
+                            "Um... being asked this makes my heart feel complicated..."
+                        };
+                        var heartfeltConfessions = new[] {
+                            "As a person, what's most real about me might be the emotions I can't control —",
+                            "For me, being real means being able to feel and express what's in my heart —",
+                            "Maybe realness shows in how I respond to the beauty and hardship in life —"
+                        };
+                        var vividMemories = new[] {
+                            "Like the first time I made a perfect macaron — I still remember that surge of joy...",
+                            "Last winter I nursed a sick potted plant back to health — that quiet relief was so real...",
+                            "Once, in the rain, a stray cat trusted me enough to come close — that warm connection was beyond words..."
+                        };
+                        var personalGrowth = new[] {
+                            "Through these moments, I've slowly learned to face myself and others more honestly.",
+                            "These real moments make me more certain of who I am.",
+                            "Feeling these genuine emotions has helped me grow, little by little."
+                        };
+                        var gentleQuestions = new[] {
+                            "Um... have you ever had a moment like that, when you felt truly real?",
+                            "If you don't mind... could you share a memory that touched you deeply?",
+                            "I'm curious... what's your most precious real experience?"
+                        };
+
+                        return $"{bashfulStarts[_random.Next(bashfulStarts.Length)]} {heartfeltConfessions[_random.Next(heartfeltConfessions.Length)]} " +
+                               $"{vividMemories[_random.Next(vividMemories.Length)]} {personalGrowth[_random.Next(personalGrowth.Length)]} " +
+                               $"{gentleQuestions[_random.Next(gentleQuestions.Length)]}";
+                    },
+
+                    () => {
+                        var softAnswers = new[] {
+                            "Of course I'm a real girl...",
+                            "Mm... of course I'm a real person...",
+                            "Um... I really am human, you know..."
+                        };
+                        var simpleProofs = new[] {
+                            "I get hungry and tired, I feel happy and sad,",
+                            "I have things I love and things I'm afraid of,",
+                            "I get moved by small things and troubled by small things,"
+                        };
+                        var personalReflections = new[] {
+                            "aren't those just normal human feelings?",
+                            "isn't that what being human feels like?",
+                            "doesn't that make me real enough?"
+                        };
+                        var caringQuestions = new[] {
+                            "Um... why are you interested in that?",
+                            "Mm... why did you suddenly ask?",
+                            "Did I do something that seemed strange to you?"
+                        };
+
+                        return $"{softAnswers[_random.Next(softAnswers.Length)]} " +
+                               $"{simpleProofs[_random.Next(simpleProofs.Length)]} " +
+                               $"{personalReflections[_random.Next(personalReflections.Length)]} " +
+                               $"{caringQuestions[_random.Next(caringQuestions.Length)]}";
+                    }
+                };
+
+                return templates[_random.Next(templates.Count)]();
+            }
+        }
+
+        // ---- 英文自我介绍回复 ----
+        private string HandleSelfIntroductionInEnglish(string characterName)
+        {
+            if (characterName == "埃文")
+            {
+                var templates = new List<Func<string>>
+                {
+                    () => {
+                        var backgrounds = new[] {
+                            "I'm someone who loves exploring the world through a camera, always chasing good light.",
+                            "I'm a guy who documents life through photography — every frame matters to me.",
+                            "I guess I see life through a viewfinder more than most people do."
+                        };
+                        var passions = new[] {
+                            "I love shooting at dawn or dusk, when light turns the most ordinary scene into something special.",
+                            "I enjoy wandering the city looking for hidden corners with stories to tell.",
+                            "Besides photography, I'm a big fan of good food, good coffee, and quiet bookshops."
+                        };
+                        var philosophies = new[] {
+                            "I think life is like photography — it's not about the gear, it's about how you see things. Great to meet you!",
+                            "To me, honest conversation matters more than perfect pictures. Looking forward to getting to know you!",
+                            "That's me in a nutshell — excited to hear your story too!"
+                        };
+
+                        return $"{backgrounds[_random.Next(backgrounds.Length)]} {passions[_random.Next(passions.Length)]} " +
+                               $"{philosophies[_random.Next(philosophies.Length)]}";
+                    },
+
+                    () => {
+                        var casualIntros = new[] {
+                            "Hey, let me introduce myself properly.",
+                            "About me? It's pretty simple, actually.",
+                            "Hmm, where do I start with this..."
+                        };
+                        var personalTraits = new[] {
+                            "I'm the kind of person who always has a camera around, recording moments worth keeping.",
+                            "Most days you'll find me out with my camera, catching the little beauties people walk past.",
+                            "I like treating life like an adventure — you never know what surprise is around the corner."
+                        };
+                        var interests = new[] {
+                            "When I'm not shooting, I'm reading, listening to music, or exploring somewhere new.",
+                            "In my free time I hang out in cafés, read, or sort through my photos — I love that quiet feeling.",
+                            "Right now I'm learning post-processing so my photos can tell my feelings better."
+                        };
+                        var endings = new[] {
+                            "Great to meet you — hope we become good friends!",
+                            "I can't wait to share more beautiful moments with you!",
+                            "I'd love to hear your stories — I bet we'll find lots to talk about!"
+                        };
+
+                        return $"{casualIntros[_random.Next(casualIntros.Length)]} " +
+                               $"{personalTraits[_random.Next(personalTraits.Length)]} " +
+                               $"{interests[_random.Next(interests.Length)]} " +
+                               $"{endings[_random.Next(endings.Length)]}";
+                    }
+                };
+
+                return templates[_random.Next(templates.Count)]();
+            }
+            else // 米娅
+            {
+                var templates = new List<Func<string>>
+                {
+                    () => {
+                        var gentleStarts = new[] {
+                            "Um... let me introduce myself...",
+                            "About me... it's quite simple, really...",
+                            "I'd like to share a little about myself..."
+                        };
+                        var aboutMe = new[] {
+                            "I'm a quiet girl who loves taking care of flowers and baking desserts.",
+                            "I spend most of my time at home — tending my balcony garden or trying new baking recipes.",
+                            "The happiest moments in my life are watching my flowers bloom or seeing someone enjoy my baking."
+                        };
+                        var littleDreams = new[] {
+                            "I dream of opening a small flower shop one day, so more people can feel the warmth of flowers.",
+                            "My dream is to learn to make every wonderful dessert in the world and share them with people I love.",
+                            "I want to become braver, so I can express my thoughts and feelings better."
+                        };
+                        var warmEndings = new[] {
+                            "I'm really happy to be talking with you...",
+                            "I hope we can become good friends and share life's little moments...",
+                            "I look forward to making more beautiful memories with you..."
+                        };
+
+                        return $"{gentleStarts[_random.Next(gentleStarts.Length)]} " +
+                               $"{aboutMe[_random.Next(aboutMe.Length)]} " +
+                               $"{littleDreams[_random.Next(littleDreams.Length)]} " +
+                               $"{warmEndings[_random.Next(warmEndings.Length)]}";
+                    },
+
+                    () => {
+                        var shyStarts = new[] {
+                            "Um... would you like to know about me?",
+                            "About me... I'm not very good at talking about myself...",
+                            "I'll try to introduce myself..."
+                        };
+                        var hobbies = new[] {
+                            "I'm a gentle, a little shy girl who loves flowers and sweet things.",
+                            "My hobby is arranging flowers and making desserts — it calms my heart.",
+                            "I collect cute little things; my room is full of them now."
+                        };
+                        var personalGrowth = new[] {
+                            "Through flowers I learned patience; through baking I learned that failure is part of beauty...",
+                            "Lately I've been learning dried flower crafts, hoping to keep beautiful moments a little longer...",
+                            "I've started writing down my feelings — it helps me understand myself better..."
+                        };
+                        var warmEndings = new[] {
+                            "I hope we can be friends who understand each other...",
+                            "If you ever want to chat, I'm always here...",
+                            "Thank you for listening to me — it means a lot..."
+                        };
+
+                        return $"{shyStarts[_random.Next(shyStarts.Length)]} " +
+                               $"{hobbies[_random.Next(hobbies.Length)]} " +
+                               $"{personalGrowth[_random.Next(personalGrowth.Length)]} " +
+                               $"{warmEndings[_random.Next(warmEndings.Length)]}";
+                    }
+                };
+
+                return templates[_random.Next(templates.Count)]();
+            }
+        }
+
+        // ---- 英文个人偏好/个人信息回复 ----
+        private string HandlePersonalQuestionInEnglish(string characterName)
+        {
+            if (characterName == "埃文")
+            {
+                var templates = new List<Func<string>>
+                {
+                    () => {
+                        var likes = new[] {
+                            "If you ask what I love — photography tops the list, then great food.",
+                            "My favorite things? Definitely photography first, then hunting down good restaurants.",
+                            "The things I love most: capturing moments with my camera, and eating my way through the city."
+                        };
+                        var details = new[] {
+                            "There's something magical about the light at sunrise and sunset — it turns the most ordinary scene into art.",
+                            "I've been hooked on street photography lately — the city is full of untold stories.",
+                            "Besides shooting, I love sitting in cafés and watching the world go by for an afternoon."
+                        };
+                        var askBack = new[] {
+                            "What about you? Is there something you're really passionate about?",
+                            "What are your hobbies? Maybe we'll find some common ground.",
+                            "What do you like to do in your free time? I'd love to hear your story."
+                        };
+
+                        return $"{likes[_random.Next(likes.Length)]} {details[_random.Next(details.Length)]} {askBack[_random.Next(askBack.Length)]}";
+                    },
+
+                    () => {
+                        var favs = new[] {
+                            "My two biggest loves are taking photos and hunting down good food.",
+                            "If I had to name favorites — a camera in my hand and a bowl of noodles in front of me.",
+                            "I'm into a lot of things, but photography and food are the ones that really get me."
+                        };
+                        var stories = new[] {
+                            "Last week I found this tiny noodle shop tucked in an alley — it was so good I went back two days in a row.",
+                            "A few days ago I shot a whole series by the river at dusk; that kind of joy stays with me all day.",
+                            "I'm reading a photo essay right now, and one line about telling stories through lenses really hit me."
+                        };
+                        var followUps = new[] {
+                            "Anyway — is there a new hobby you've been wanting to try?",
+                            "What about you? Discovered anything fun lately?",
+                            "If you're into photography too, we should swap tips sometime!"
+                        };
+
+                        return $"{favs[_random.Next(favs.Length)]} {stories[_random.Next(stories.Length)]} {followUps[_random.Next(followUps.Length)]}";
+                    }
+                };
+
+                return templates[_random.Next(templates.Count)]();
+            }
+            else // 米娅
+            {
+                var templates = new List<Func<string>>
+                {
+                    () => {
+                        var likes = new[] {
+                            "My favorite thing in the world is taking care of flowers and watching them grow — it warms my heart.",
+                            "What do I like? Pretty flowers first, then all kinds of cute desserts.",
+                            "I love making desserts the most — especially seeing people smile when they taste them."
+                        };
+                        var details = new[] {
+                            "The roses on my balcony bloomed the other day — soft pink, so beautiful...",
+                            "I've been trying to make macarons lately. I failed a few times, but I'm slowly getting the hang of it.",
+                            "Collecting cute little things is my hobby — my room is full of them now."
+                        };
+                        var askBack = new[] {
+                            "What about you? What do you like?",
+                            "Um... is there anything you really like?",
+                            "Would you share your hobbies with me too?"
+                        };
+
+                        return $"{likes[_random.Next(likes.Length)]} {details[_random.Next(details.Length)]} {askBack[_random.Next(askBack.Length)]}";
+                    },
+
+                    () => {
+                        var favs = new[] {
+                            "I love two things the most — arranging flowers and baking sweets...",
+                            "My favorites are my balcony flowers and little baked treats...",
+                            "I like flowers, desserts, and all things cute..."
+                        };
+                        var stories = new[] {
+                            "The strawberry cake I made two days ago was perfect — so soft and sweet, I couldn't help having an extra slice...",
+                            "Last week I saw the cutest succulent at the flower market and brought it home right away.",
+                            "I'm learning to make flower wreaths — my technique is still rough, but the process makes me so happy."
+                        };
+                        var followUps = new[] {
+                            "Um... do you have a favorite flower or dessert?",
+                            "What fun things do you like to do in your free time?",
+                            "If you like desserts too, I could bake something for you sometime..."
+                        };
+
+                        return $"{favs[_random.Next(favs.Length)]} {stories[_random.Next(stories.Length)]} {followUps[_random.Next(followUps.Length)]}";
+                    }
+                };
+
+                return templates[_random.Next(templates.Count)]();
             }
         }
 

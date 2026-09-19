@@ -101,7 +101,8 @@ namespace LlamaChat
         public const int RelevanceCheckRounds = 5;
         public const double RelevanceThreshold = 0.3;
 
-        public const string LlamaFolderName = "llama";
+        public const string LlamaFolderName = "Lumina-Engine";
+        public const string ModelsFolderName = "models";
 
         // 模型文件名映射
         public static readonly IReadOnlyDictionary<ModelMode, string> ModelFiles = new Dictionary<ModelMode, string>
@@ -126,10 +127,30 @@ namespace LlamaChat
         public const string McpFolderName = "mcp";
         public const string McpExeName = "WindowsMcp.exe";
 
-        // 语言风格转换（Miya）配置：独立 llama-server（Qwen2.5-0.5B），端口 38090
+        // 语言风格转换（Miya）配置：独立原生引擎（Qwen2.5-0.5B，Lumina-Engine.dll）
         public const int StyleTransferPort = 38090;
         public const string StyleTransferModel = "Qwen2.5-0.5B-Q4_K_M.gguf";
         public const int StyleTransferContextSize = 8192;
+
+        // ---- 数据目录解析（Lumina-Engine / models）----
+        // 优先使用可执行文件旁的同名目录（发布布局）；否则向上回溯到项目根目录
+        // （开发布局：bin/Debug/net8.0 -> ... -> 项目根），
+        // 从而无需把数 GB 的模型文件复制到 bin。
+        public static string ResolveDataDirectory(string name)
+        {
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string candidate = Path.Combine(baseDir, name);
+            if (Directory.Exists(candidate)) return candidate;
+
+            var dir = new DirectoryInfo(baseDir);
+            for (int i = 0; i < 8 && dir != null; i++)
+            {
+                candidate = Path.Combine(dir.FullName, name);
+                if (Directory.Exists(candidate)) return candidate;
+                dir = dir.Parent;
+            }
+            return Path.Combine(baseDir, name);
+        }
     }
 
     // ===================================================================
@@ -144,8 +165,7 @@ namespace LlamaChat
             MiyaBonsai     // 用风格转换模型转换
         }
 
-        private Process _serverProcess;
-        private readonly HttpClient _httpClient;
+        private LlamaEngine _engine;                 // 原生推理引擎（Lumina-Engine.dll）
         private readonly int _contextSize;
         private readonly ConversationContext _context;
         private readonly SemanticCache _cache;
@@ -160,6 +180,19 @@ namespace LlamaChat
 
         // 语言风格转换服务（Miya）：懒加载，仅在需要转换时创建并启动服务器
         private StyleTransferService? _styleTransfer;
+
+        // ---- 速度统计（最近一次模型回答）----
+        private EngineStats _transformStats;
+        private bool _transformUsed;
+
+        /// <summary>最近一次模型回答的速度报告文本（模板回复或未推理时为 null）。</summary>
+        public string? LastSpeedText { get; private set; }
+
+        /// <summary>最近一次主模型推理的速度统计。</summary>
+        public EngineStats LastSpeed => _engine?.Stats ?? default;
+
+        /// <summary>最近一次风格转换（转化模型）的速度统计；未使用时均为 0。</summary>
+        public EngineStats LastTransformSpeed => _transformStats;
 
         // 自定义系统提示词（null = 使用默认）
         private string? _customSystemPrompt;
@@ -192,8 +225,14 @@ namespace LlamaChat
         public LlamaChatService(LuminaOptions? options = null)
         {
             _options = options ?? new LuminaOptions();
-            _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(15) };
             _currentMode = _options.InitialMode;
+
+            // 将原生（ggml/llama）日志接入应用日志，仅保留后端加载信息，用于确认实际加载的 CPU 变体（ggml-cpu-<arch>.dll）
+            LlamaEngine.LogSink = message =>
+            {
+                if (message.Contains("load_backend") || message.Contains("loaded CPU backend"))
+                    Log(LogLevel.Info, message);
+            };
 
             // 计算上下文大小（与模型无关）
             if (_options.ManualContextSize.HasValue && _options.ManualContextSize.Value > 0)
@@ -228,7 +267,7 @@ namespace LlamaChat
         {
         }
 
-        // ---- 启动 llama-server 与 MCP（库模式建议显式调用） ----
+        // ---- 加载模型与 MCP（库模式建议显式调用） ----
         public async Task InitializeAsync()
         {
             StartServerForMode(_currentMode);
@@ -261,7 +300,11 @@ namespace LlamaChat
         {
             if (string.IsNullOrWhiteSpace(text)) return text;
             _styleTransfer ??= new StyleTransferService(_options.Language);
-            return await _styleTransfer.ConvertMarkdownAsync(text);
+            _styleTransfer.ResetStats();
+            string converted = await _styleTransfer.ConvertMarkdownAsync(text);
+            _transformStats = _styleTransfer.Stats;   // 记录转化模型速度
+            _transformUsed = true;
+            return converted;
         }
 
         // ---- 设置自定义系统提示词（传 null 恢复内置默认） ----
@@ -315,14 +358,15 @@ namespace LlamaChat
             if (string.IsNullOrWhiteSpace(userInput)) return null;
 
             string name = RoleToCharacterName(role);
+            bool isEnglish = _identity.IsEnglishInput(userInput);
             if (_identity.IsGreeting(userInput))
-                return _identity.HandleGreeting(name);
+                return _identity.HandleGreeting(name, isEnglish);
             if (_identity.IsIdentityQuestion(userInput))
-                return _identity.HandleIdentityQuestion(name, userInput);
+                return _identity.HandleIdentityQuestion(name, userInput, isEnglish);
             if (_identity.IsSelfIntroduction(userInput))
-                return _identity.HandleSelfIntroduction(name);
+                return _identity.HandleSelfIntroduction(name, isEnglish);
             if (_identity.IsPersonalInfoQuestion(userInput))
-                return _identity.HandlePersonalQuestion(name);
+                return _identity.HandlePersonalQuestion(name, isEnglish);
             return null;
         }
 
@@ -331,7 +375,46 @@ namespace LlamaChat
         {
             _context.AddMessage("user", userInput);
             _context.AddMessage("assistant", reply);
+            LastSpeedText = null;   // 模板回复未使用模型，不显示速度
             AnswerReceived?.Invoke(userInput, reply);
+        }
+
+        // ===================================================================
+        // 速度报告：阅读 / 输出 / 转化-阅读 / 转化-输出
+        // 在模型回答完成后生成（模板回复不生成）
+        // ===================================================================
+        private void PublishSpeedReport()
+        {
+            // 仅当转化模型确实参与并产生了数据时才显示转化速度
+            bool withTransform = _transformUsed && _transformStats.HasData;
+            LastSpeedText = FormatSpeedReport(_engine?.Stats ?? default, withTransform, _transformStats);
+        }
+
+        private string FormatSpeedReport(EngineStats main, bool withTransform, EngineStats tr)
+        {
+            string Seg(string label, long tok, double ms)
+            {
+                double tps = ms > 0 ? tok * 1000.0 / ms : 0.0;
+                return $"{label} {tok} tok / {ms / 1000.0:F2}s = {tps:F1} tok/s";
+            }
+
+            string head = T("[速度]", "[Speed]");
+            var sb = new StringBuilder();
+            sb.Append(head).Append(' ');
+            sb.Append(Seg(T("阅读", "Read"), main.PromptTokens, main.PromptMs));
+            sb.Append("    ");
+            sb.Append(Seg(T("输出", "Write"), main.GeneratedTokens, main.GeneratedMs));
+
+            if (withTransform)
+            {
+                sb.AppendLine();
+                sb.Append(head).Append(' ');
+                sb.Append(Seg(T("转化-阅读", "Transform-Read"), tr.PromptTokens, tr.PromptMs));
+                sb.Append("    ");
+                sb.Append(Seg(T("转化-输出", "Transform-Write"), tr.GeneratedTokens, tr.GeneratedMs));
+            }
+
+            return sb.ToString();
         }
 
         // ---- 模型文件 / 端口解析（优先 options，缺省回退 AppConfig 默认） ----
@@ -341,98 +424,47 @@ namespace LlamaChat
         private int GetModelPort(ModelMode mode)
             => _options.ModelPorts != null && _options.ModelPorts.TryGetValue(mode, out var p) ? p : AppConfig.ModelPorts[mode];
 
-        // ---- 根据模式启动服务器 ----
+        // ---- 加载指定模式的模型（原生 Lumina-Engine.dll，不再启动 llama-server 进程）----
         private void StartServerForMode(ModelMode mode)
         {
-            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string llamaDir = Path.Combine(baseDir, _options.LlamaFolderName);
-            string serverExe = Path.Combine(llamaDir, "llama-server.exe");
+            string modelsDir = AppConfig.ResolveDataDirectory(_options.ModelsFolderName);
             string modelFile = GetModelFile(mode);
-            string modelPath = Path.Combine(llamaDir, modelFile);
-            int port = GetModelPort(mode);
+            string modelPath = Path.Combine(modelsDir, modelFile);
 
-            if (!File.Exists(serverExe))
-            {
-                Log(LogLevel.Error, T("未找到 llama-server.exe: {0}", "llama-server.exe not found: {0}", serverExe));
-                throw new FileNotFoundException(T("未找到 {0}", "Not found: {0}", serverExe));
-            }
             if (!File.Exists(modelPath))
             {
                 Log(LogLevel.Error, T("未找到模型文件: {0}", "Model file not found: {0}", modelPath));
                 throw new FileNotFoundException(T("未找到模型文件 {0}", "Model file not found: {0}", modelPath));
             }
 
-            // 先确保没有残留的 llama-server 进程（避免端口冲突）
-            KillAllLlamaServers();
+            UnloadEngine();
 
-            int threads = Environment.ProcessorCount;
-            string args = $"-m \"{modelPath}\" --host 127.0.0.1 --port {port} -c {_contextSize} -t {threads}";
-
-            var si = new ProcessStartInfo
-            {
-                FileName = serverExe,
-                Arguments = args,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-            _serverProcess = new Process { StartInfo = si };
-            _serverProcess.OutputDataReceived += (s, e) => { if (!string.IsNullOrEmpty(e.Data)) Debug.WriteLine($"[llama] {e.Data}"); };
-            _serverProcess.ErrorDataReceived += (s, e) => { if (!string.IsNullOrEmpty(e.Data)) Debug.WriteLine($"[llama-err] {e.Data}"); };
-            _serverProcess.Start();
-            _serverProcess.BeginOutputReadLine();
-            _serverProcess.BeginErrorReadLine();
-
-            Log(LogLevel.Prompt, T("正在启动 llama-server (模式: {0}, 端口: {1})...", "Starting llama-server (mode: {0}, port: {1})...", mode, port));
-            bool ready = WaitForServerAsync(port).GetAwaiter().GetResult();
-            if (!ready)
-            {
-                Log(LogLevel.Error, T("llama-server (端口 {0}) 启动超时。", "llama-server (port {0}) startup timed out.", port));
-                throw new TimeoutException(T("llama-server 启动超时 (端口 {0})。", "llama-server startup timed out (port {0}).", port));
-            }
-            Log(LogLevel.Success, T("llama-server 已就绪！(模式: {0}, 端口: {1})", "llama-server ready! (mode: {0}, port: {1})", mode, port));
+            Log(LogLevel.Prompt, T("正在加载模型 (模式: {0})...", "Loading model (mode: {0})...", mode));
+            int threads = _options.Threads > 0 ? _options.Threads : Environment.ProcessorCount;
+            _engine = new LlamaEngine(modelPath, modelFile, _contextSize, threads);
+            Log(LogLevel.Success, T("模型已就绪！(模式: {0}, n_ctx: {1}, 线程: {2})",
+                "Model ready! (mode: {0}, n_ctx: {1}, threads: {2})", mode, _engine.NCtx, threads));
         }
 
-        // 等待服务器就绪（指定端口）
-        private async Task<bool> WaitForServerAsync(int port, int maxSeconds = 6000)
+        // ---- 释放当前引擎 ----
+        private void UnloadEngine()
         {
-            string url = $"http://127.0.0.1:{port}/health";
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
-            for (int i = 0; i < maxSeconds; i++)
+            if (_engine != null)
             {
-                try
-                {
-                    var resp = await client.GetAsync(url);
-                    if (resp.IsSuccessStatusCode) return true;
-                }
-                catch { }
-                await Task.Delay(1000);
+                try { _engine.Dispose(); } catch { }
+                _engine = null;
             }
-            return false;
         }
 
-        // ---- 停止当前服务器 ----
+        // ---- 停止当前模型 ----
         private void StopCurrentServer()
         {
-            if (_serverProcess != null && !_serverProcess.HasExited)
-            {
-                try
-                {
-                    _serverProcess.Kill();
-                    _serverProcess.WaitForExit(5000);
-                }
-                catch { }
-                _serverProcess.Dispose();
-                _serverProcess = null;
-            }
-            // 额外杀所有残留进程（确保端口释放）
+            UnloadEngine();
+            // 额外清理旧版本遗留的 llama-server 进程
             KillAllLlamaServers();
         }
 
-        // ---- 杀死所有 llama-server 进程 ----
+        // ---- 清理旧版本遗留的 llama-server 进程（native 模式已不再使用服务器）----
         private void KillAllLlamaServers()
         {
             var processes = Process.GetProcessesByName("llama-server");
@@ -470,8 +502,11 @@ namespace LlamaChat
         // ---- 获取当前模式 ----
         public ModelMode CurrentMode => _currentMode;
 
-        // ---- 获取端口 ----
+        // ---- 获取端口（兼容保留；原生推理不再使用端口）----
         public int CurrentPort => GetModelPort(_currentMode);
+
+        // ---- 当前上下文长度（原生模式）----
+        public int NCtx => _engine?.NCtx ?? 0;
 
         // +MCP: 初始化 MCP 客户端
         private async Task InitializeMcpAsync()
@@ -502,6 +537,7 @@ namespace LlamaChat
                 _toolSelector = new McpToolSelector(_mcpTools, () => _options.Language);
                 _isMcpReady = true;
                 Log(LogLevel.Success, T("MCP 已就绪，加载了 {0} 个工具（智能选择：每次预选 {1} 个）", "MCP ready, loaded {0} tool(s) (smart selection: {1} per request)", _mcpTools.Count, _options.SelectedToolsPerRequest));
+                Log(LogLevel.Info, T("已加载的 MCP 工具: {0}", "Loaded MCP tools: {0}", string.Join(", ", _mcpTools.Select(t => t.Name))));
             }
             catch (Exception ex)
             {
@@ -581,6 +617,24 @@ namespace LlamaChat
             };
         }
 
+        // ---- 上下文降噪：把超长工具结果截断后再写入对话 ----
+        // 大结果（如 process 全量列表、大文件）既挤占上下文又会拖垮 llama-server；
+        // 这里保留“头部 + 尾部”（关键信息常在末尾，如内存占用最高的进程），中间以标记省略。
+        private string TruncateToolResultForContext(string result)
+        {
+            int maxChars = _options.MaxToolResultChars;
+            if (string.IsNullOrEmpty(result) || maxChars <= 0 || result.Length <= maxChars)
+                return result;
+
+            int keepHead = maxChars * 3 / 5;
+            int keepTail = maxChars - keepHead;
+            string marker = T(
+                $"\n…[结果过长已截断：原文 {result.Length} 字符，此处仅保留前 {keepHead} + 后 {keepTail} 字符]\n",
+                $"\n...[result truncated: {result.Length} chars total, keeping first {keepHead} + last {keepTail}]\n");
+
+            return result.Substring(0, keepHead) + marker + result.Substring(result.Length - keepTail);
+        }
+
         // ---- 解析 Claude 风格文本工具调用（Bonsai 等模型可能不在 tool_calls 里输出，
         //      而是在 content 中直接输出 {"name":"xxx","arguments":{...}}</tool_call> 或 XML <invoke>）----
         // isKnownTool：仅当工具名是真实存在的工具时才解析成功，避免误把普通对话 JSON 当工具调用。
@@ -654,21 +708,103 @@ namespace LlamaChat
             return false;
         }
 
-        // +MCP: 封装 HTTP 调用（根据当前端口）
+        // ---- 原生推理：把 OpenAI 风格请求交给本地引擎执行（不再经 HTTP / llama-server）----
         private async Task<JObject> PostChatCompletionAsync(JObject requestBody)
         {
-            int port = CurrentPort;
-            string apiUrl = $"http://127.0.0.1:{port}/v1/chat/completions";
-            var json = requestBody.ToString(Formatting.None);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var response = await _httpClient.PostAsync(apiUrl, content);
-            if (!response.IsSuccessStatusCode)
+            var engine = _engine;
+            if (engine == null)
+                throw new InvalidOperationException(T("模型引擎未就绪。", "Model engine is not ready."));
+
+            // 解码是 CPU 密集操作，放到线程池执行，避免阻塞调用线程
+            return await Task.Run(() => RunChatCompletion(engine, requestBody));
+        }
+
+        // ---- 执行一次对话补全：messages/tools → ChatML 提示词 → 解码 → OpenAI 风格响应 ----
+        private JObject RunChatCompletion(LlamaEngine engine, JObject requestBody)
+        {
+            var turns = new List<LlamaEngine.ChatTurn>();
+            if (requestBody["messages"] is JArray msgs)
             {
-                string err = await response.Content.ReadAsStringAsync();
-                throw new Exception($"HTTP {response.StatusCode}: {err}");
+                foreach (var m in msgs)
+                {
+                    string role = m["role"]?.ToString() ?? "user";
+                    var turn = new LlamaEngine.ChatTurn
+                    {
+                        Role = role,
+                        Content = m["content"]?.ToString() ?? ""
+                    };
+
+                    if (role == "assistant" && m["tool_calls"] is JArray tcs && tcs.Count > 0)
+                    {
+                        turn.ToolCalls = new List<(string Name, string Arguments)>();
+                        foreach (var tc in tcs)
+                        {
+                            string tn = tc["function"]?["name"]?.ToString();
+                            if (string.IsNullOrEmpty(tn)) continue;
+                            string ta = tc["function"]?["arguments"]?.ToString();
+                            turn.ToolCalls.Add((tn, string.IsNullOrWhiteSpace(ta) ? "{}" : ta));
+                        }
+                    }
+
+                    turns.Add(turn);
+                }
             }
-            string jsonResponse = await response.Content.ReadAsStringAsync();
-            return JObject.Parse(jsonResponse);
+
+            List<string> tools = null;
+            if (requestBody["tools"] is JArray toolArr && toolArr.Count > 0)
+            {
+                tools = new List<string>(toolArr.Count);
+                foreach (var t in toolArr) tools.Add(t.ToString(Formatting.None));
+            }
+
+            int maxTokens = requestBody["max_tokens"]?.Value<int>() ?? _options.MaxResponseTokens;
+            float temperature = requestBody["temperature"]?.Value<float>() ?? 0.7f;
+            float topP = requestBody["top_p"]?.Value<float>() ?? 0.95f;
+            float repeatPenalty = requestBody["repeat_penalty"]?.Value<float>() ?? 1.0f;
+
+            var (content, toolCalls) = engine.Chat(turns, tools, maxTokens, temperature, topP, repeatPenalty);
+
+            var message = new JObject
+            {
+                ["role"] = "assistant",
+                ["content"] = content ?? ""
+            };
+
+            if (toolCalls.Count > 0)
+            {
+                var arr = new JArray();
+                for (int i = 0; i < toolCalls.Count; i++)
+                {
+                    arr.Add(new JObject
+                    {
+                        ["id"] = "call_" + Guid.NewGuid().ToString("N"),
+                        ["type"] = "function",
+                        ["function"] = new JObject
+                        {
+                            ["name"] = toolCalls[i].Name,
+                            ["arguments"] = toolCalls[i].Arguments
+                        }
+                    });
+                }
+                message["tool_calls"] = arr;
+            }
+
+            return new JObject
+            {
+                ["id"] = "chatcmpl-native",
+                ["object"] = "chat.completion",
+                ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                ["model"] = GetModelFile(_currentMode),
+                ["choices"] = new JArray
+                {
+                    new JObject
+                    {
+                        ["index"] = 0,
+                        ["message"] = message,
+                        ["finish_reason"] = toolCalls.Count > 0 ? "tool_calls" : "stop"
+                    }
+                }
+            };
         }
 
         // ---- 导入历史 ----
@@ -716,6 +852,12 @@ namespace LlamaChat
         public async Task<string> SendMessageAsync(string userInput, Func<string, Task<string>>? postProcess = null)
         {
             if (string.IsNullOrEmpty(userInput)) return string.Empty;
+
+            // 速度统计：每次回答重新计数（阅读/输出/转化）
+            _engine?.ResetStats();
+            _transformStats = default;
+            _transformUsed = false;
+            LastSpeedText = null;
 
             // 1. 语义缓存
             if (_options.EnableSemanticCache)
@@ -825,11 +967,13 @@ namespace LlamaChat
             // 预选工具在此一次性完成（与请求中的 tools 数组共用同一份），
             // 并把“工具名+用途”以纯文本注入，帮助小模型正确选择。
             List<McpClientTool> smartSelected = null;
+            int toolGuidanceMsgIndex = -1;   // “工具使用引导”那条 system 消息的位置（收尾轮原地换成“直接回答”指令）
             if (allowControl && _isMcpReady && _toolSelector != null && _options.SelectedToolsPerRequest > 0)
             {
                 smartSelected = _toolSelector.SelectTopTools(
                     BuildSelectionQueryText(userInput, windowMessages, relevantHistories),
                     _options.SelectedToolsPerRequest);
+                toolGuidanceMsgIndex = messages.Count;
                 messages.Add(new JObject
                 {
                     ["role"] = "system",
@@ -1145,8 +1289,17 @@ namespace LlamaChat
                             {
                                 ["role"] = "tool",
                                 ["tool_call_id"] = callId,
-                                ["content"] = resultContent
+                                ["content"] = TruncateToolResultForContext(resultContent)
                             });
+                        }
+
+                        // 换指令：工具结果已到手 → 把“优先调用工具”的引导就地换成“优先直接回答”，
+                        // 避免收尾轮仍被推向继续调用工具；原地替换可防止上下文随轮次膨胀。
+                        if (toolGuidanceMsgIndex >= 0 && toolGuidanceMsgIndex < messages.Count)
+                        {
+                            messages[toolGuidanceMsgIndex]["content"] = T(
+                                "工具结果已经返回。如果这些信息足以回答用户，请立即用文字给出最终回答，不要再调用工具；只有确实还缺少关键信息时，才继续调用工具（参数请用真实路径或英文可执行名）。",
+                                "Tool results are in. If they are enough to answer the user, give the final text answer now and stop calling tools; only call another tool if key information is still missing (use real paths or English executable names as arguments).");
                         }
                     }
 
@@ -1183,6 +1336,7 @@ namespace LlamaChat
                         _context.AddMessage("user", userInput);
                         _context.AddMessage("assistant", stopMsg);
                         AnswerReceived?.Invoke(userInput, stopMsg);
+                        PublishSpeedReport();
                         return stopMsg;
                     }
 
@@ -1207,6 +1361,7 @@ namespace LlamaChat
                     _context.AddMessage("user", userInput);
                     _context.AddMessage("assistant", finalMsg);
                     AnswerReceived?.Invoke(userInput, finalMsg);
+                    PublishSpeedReport();
                     return finalMsg;
                 }
                 else
@@ -1219,6 +1374,7 @@ namespace LlamaChat
                     if (_options.EnableSemanticCache)
                         _cache.AddEntry(userInput, final);
                     AnswerReceived?.Invoke(userInput, final);
+                    PublishSpeedReport();
                     return final;
                 }
             }
@@ -1228,6 +1384,7 @@ namespace LlamaChat
             _context.AddMessage("user", userInput);
             _context.AddMessage("assistant", limitMsg);
             AnswerReceived?.Invoke(userInput, limitMsg);
+            PublishSpeedReport();
             return limitMsg;
         }
 
@@ -1309,7 +1466,6 @@ namespace LlamaChat
             _isDisposed = true;
 
             StopCurrentServer();
-            _httpClient?.Dispose();
             _styleTransfer?.Dispose();
             if (_mcpClient != null)
             {
@@ -1820,11 +1976,11 @@ namespace LlamaChat
 
             Console.Write("\x1b[38;2;252;255;175m");
             Console.WriteLine("Welcome to Lumina AI Core!");
-            Console.WriteLine("Build 9");
+            Console.WriteLine("Build 15");
             Console.WriteLine("");
 
 
-            // 创建服务（仅内存态）并启动 llama-server / MCP
+            // 创建服务（仅内存态）并加载模型 / MCP
             await using var service = new LlamaChatService(options);
             await service.InitializeAsync();
 
@@ -1840,7 +1996,7 @@ namespace LlamaChat
             }
 
             ConsoleHelper.Prompt(L("\n======= Lumina AI Core 已启动 =======", "\n======= Lumina AI Core Started ======="));
-            ConsoleHelper.Prompt(Lf("当前模型模式: {0} (端口 {1})", "Model mode: {0} (port {1})", service.CurrentMode, service.CurrentPort));
+            ConsoleHelper.Prompt(Lf("当前模型模式: {0} (上下文 {1})", "Model mode: {0} (ctx {1})", service.CurrentMode, service.NCtx));
             ConsoleHelper.Prompt(L(
                 "\n命令:\n /mode [fast|balanced|quality] 切换模型\n /lang [zh|en|auto] 切换语言\n /clear 清除历史\n /stats 缓存统计\n exit 退出",
                 "\nCommands:\n /mode [fast|balanced|quality] switch model\n /lang [zh|en|auto] switch language\n /clear clear history\n /stats cache stats\n exit quit"));
@@ -1849,7 +2005,7 @@ namespace LlamaChat
             while (true)
             {
                 // 显示当前模式
-                ConsoleHelper.Info(Lf("当前模式: {0} (端口 {1})", "Mode: {0} (port {1})", service.CurrentMode, service.CurrentPort));
+                ConsoleHelper.Info(Lf("当前模式: {0} (上下文 {1})", "Mode: {0} (ctx {1})", service.CurrentMode, service.NCtx));
                 ConsoleHelper.UserContentNoNewLine(L("用户: ", "You: "));
                 string input = Console.ReadLine();
                 if (string.IsNullOrEmpty(input)) continue;
@@ -1872,7 +2028,7 @@ namespace LlamaChat
                             try
                             {
                                 await service.SwitchModeAsync(newMode);
-                                ConsoleHelper.Success(Lf("已切换至 {0} 模式 (端口 {1})", "Switched to {0} mode (port {1})", newMode, service.CurrentPort));
+                                ConsoleHelper.Success(Lf("已切换至 {0} 模式 (上下文 {1})", "Switched to {0} mode (ctx {1})", newMode, service.NCtx));
                             }
                             catch (Exception ex)
                             {
@@ -1940,6 +2096,10 @@ namespace LlamaChat
                     // 发送消息（SendMessageAsync 内部自动按角色决定是否做 Miya 风格转换）
                     string reply = await service.SendMessageAsync(input, role);
                     ConsoleHelper.UserContent(Lf("助手: {0}", "Assistant: {0}", reply));
+
+                    // 模型回答完成后显示速度（阅读 / 输出 / 转化-阅读 / 转化-输出）
+                    if (!string.IsNullOrEmpty(service.LastSpeedText))
+                        ConsoleHelper.Info(service.LastSpeedText);
                 }
                 catch (Exception ex)
                 {
@@ -1949,7 +2109,7 @@ namespace LlamaChat
             }
 
             ConsoleHelper.Prompt(L("正在退出...", "Exiting..."));
-            // 显式释放资源（llama-server 清理、MCP 释放），再强制退出：
+            // 显式释放资源（原生引擎、MCP），再强制退出：
             // MCP 库的子进程线程可能阻止进程自然结束
             await service.DisposeAsync();
             ConsoleHelper.Prompt(L("退出完成，再见！", "Goodbye!"));

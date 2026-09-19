@@ -14,8 +14,8 @@ namespace LlamaChat
 {
     // ===================================================================
     // Miya 语言风格转换服务（C# 版，移植自 Python example.py）
-    // 使用 llama.cpp llama-server（端口 38090，Qwen2.5-0.5B-Q4_K_M.gguf）
-    // 通过 /completion + cache_prompt 增量生成，在客户端实现语义漂移停止准则
+    // 使用 llama.cpp 原生接口（Lumina-Engine.dll，通过 LlamaEngine P/Invoke）
+    // 基于原始补全 + KV 前缀复用做增量生成，在客户端实现语义漂移停止准则
     // ===================================================================
     public class StyleTransferService : IDisposable
     {
@@ -57,8 +57,7 @@ namespace LlamaChat
         private const string SentencePunctChars = "。！？.!?～~";
 
         // ---- 服务器状态 ----
-        private Process _serverProcess;
-        private readonly HttpClient _http;
+        private LlamaEngine _engine;
         private bool _serverReady = false;
 
         // 界面语言（仅用于启动消息；Auto = 跟随系统）
@@ -72,120 +71,62 @@ namespace LlamaChat
         public StyleTransferService(AppLanguage language = AppLanguage.Auto)
         {
             _language = language;
-            _http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
             EnsureServer();
             WarmupAsync().GetAwaiter().GetResult();
         }
 
         // ===================================================================
-        // 服务器管理（惰性启动 + 健康检查，被其他进程误杀后可自动恢复）
+        // 模型管理（native Lumina-Engine.dll；惰性加载）
         // ===================================================================
         public void EnsureServer()
         {
-            try
-            {
-                var resp = _http.GetAsync($"http://127.0.0.1:{Port}/health").GetAwaiter().GetResult();
-                if (resp.IsSuccessStatusCode) { _serverReady = true; return; }
-            }
-            catch { }
-
-            _serverReady = false;
+            if (_engine != null) { _serverReady = true; return; }
             StartServer();
         }
 
+        /// <summary>清零速度统计（每次转换开始前调用）。</summary>
+        public void ResetStats() => _engine?.ResetStats();
+
+        /// <summary>上次转换的速度统计。</summary>
+        public EngineStats Stats => _engine?.Stats ?? default;
+
         private void StartServer()
         {
-            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string llamaDir = Path.Combine(baseDir, "llama");
-            string serverExe = Path.Combine(llamaDir, "llama-server.exe");
-            string modelPath = Path.Combine(llamaDir, ModelFile);
+            string modelsDir = AppConfig.ResolveDataDirectory(AppConfig.ModelsFolderName);
+            string modelPath = Path.Combine(modelsDir, ModelFile);
 
-            if (!File.Exists(serverExe))
-                throw new FileNotFoundException(I18n.T(_language, "未找到 {0}", "Not found: {0}", serverExe));
             if (!File.Exists(modelPath))
                 throw new FileNotFoundException(I18n.T(_language, "未找到风格转换模型 {0}", "Style-transfer model not found: {0}", modelPath));
 
+            ConsoleHelper.Prompt(I18n.T(_language, "正在加载风格转换模型 (native Lumina-Engine.dll)...", "Loading style-transfer model (native Lumina-Engine.dll)..."));
             int threads = Environment.ProcessorCount;
-            string args = $"-m \"{modelPath}\" --host 127.0.0.1 --port {Port} -c {ContextSize} -t {threads}";
-
-            var si = new ProcessStartInfo
-            {
-                FileName = serverExe,
-                Arguments = args,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            _serverProcess = new Process { StartInfo = si };
-            _serverProcess.Start();
-            _serverProcess.BeginOutputReadLine();
-            _serverProcess.BeginErrorReadLine();
-
-            ConsoleHelper.Prompt(I18n.T(_language, "正在启动风格转换 llama-server (端口 {0})...", "Starting style-transfer llama-server (port {0})...", Port));
-            bool ready = WaitForServerAsync().GetAwaiter().GetResult();
-            if (!ready)
-                throw new TimeoutException(I18n.T(_language, "风格转换 llama-server (端口 {0}) 启动超时。", "Style-transfer llama-server (port {0}) startup timed out.", Port));
+            _engine = new LlamaEngine(modelPath, ModelFile, ContextSize, threads);
             _serverReady = true;
-            ConsoleHelper.Success(I18n.T(_language, "风格转换 llama-server 已就绪！(端口 {0})", "Style-transfer llama-server ready! (port {0})", Port));
-        }
-
-        private async Task<bool> WaitForServerAsync(int maxSeconds = 120)
-        {
-            string url = $"http://127.0.0.1:{Port}/health";
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
-            for (int i = 0; i < maxSeconds; i++)
-            {
-                try
-                {
-                    var resp = await client.GetAsync(url);
-                    if (resp.IsSuccessStatusCode) return true;
-                }
-                catch { }
-                await Task.Delay(1000);
-            }
-            return false;
+            ConsoleHelper.Success(I18n.T(_language, "风格转换模型已就绪！(n_ctx: {0})", "Style-transfer model ready! (n_ctx: {0})", _engine.NCtx));
         }
 
         // ===================================================================
-        // llama.cpp HTTP 辅助
+        // 原生推理辅助（Lumina-Engine.dll）
         // ===================================================================
-        private async Task<List<int>> TokenizeAsync(string text)
-        {
-            var body = new JObject { ["content"] = text };
-            var resp = await PostJsonAsync("/tokenize", body);
-            return (resp["tokens"] as JArray)?.Select(t => t.Value<int>()).ToList() ?? new List<int>();
-        }
+        private Task<List<int>> TokenizeAsync(string text)
+            => Task.FromResult(_engine.Tokenize(text).ToList());
 
-        private async Task<JObject> PostJsonAsync(string path, JObject body)
+        // 注意：KV 前缀复用（原 cache_prompt）由引擎内部自动完成
+        private Task<(string Content, int TokensPredicted)> CompleteAsync(string prompt, int nPredict, double temperature, double topP, double rp)
         {
-            var content = new StringContent(body.ToString(Formatting.None), Encoding.UTF8, "application/json");
-            var resp = await _http.PostAsync($"http://127.0.0.1:{Port}{path}", content);
-            if (!resp.IsSuccessStatusCode)
+            var opt = new LlamaEngine.SamplingOptions
             {
-                string err = await resp.Content.ReadAsStringAsync();
-                throw new Exception($"HTTP {resp.StatusCode} {path}: {err}");
-            }
-            return JObject.Parse(await resp.Content.ReadAsStringAsync());
-        }
-
-        private async Task<(string Content, int TokensPredicted)> CompleteAsync(string prompt, int nPredict, double temperature, double topP, double rp)
-        {
-            var body = new JObject
-            {
-                ["prompt"] = prompt,
-                ["n_predict"] = nPredict,
-                ["temperature"] = temperature,
-                ["top_p"] = topP,
-                ["repeat_penalty"] = rp,
-                ["cache_prompt"] = true,
-                ["stream"] = false
+                MaxTokens = nPredict,
+                Temperature = (float)temperature,
+                TopP = (float)topP,
+                RepeatPenalty = (float)rp
             };
-            var resp = await PostJsonAsync("/completion", body);
-            string c = resp["content"]?.ToString() ?? "";
-            int tp = resp["tokens_predicted"]?.Value<int>() ?? 0;
-            return (c, tp);
+
+            return Task.Run(() =>
+            {
+                var (text, n) = _engine.Complete(prompt, opt);
+                return (text, n);
+            });
         }
 
         // 启动时预热：停用词/标点 -> token id（供漂移检测用）
@@ -230,6 +171,7 @@ namespace LlamaChat
         public async Task<string> ConvertMarkdownAsync(string markdown)
         {
             EnsureServer(); // 若被误杀则自动重启
+            _engine?.ResetStats();   // 统计本次转换的读写速度
             string lang = DetectLang(markdown);
             int minNewTokens = lang == "en" ? 6 : 8;
             int windowSize = lang == "en" ? 15 : 20;
@@ -726,18 +668,12 @@ namespace LlamaChat
         // ===================================================================
         public void Dispose()
         {
-            if (_serverProcess != null && !_serverProcess.HasExited)
+            if (_engine != null)
             {
-                try
-                {
-                    _serverProcess.Kill();
-                    _serverProcess.WaitForExit(5000);
-                }
-                catch { }
-                _serverProcess.Dispose();
-                _serverProcess = null;
+                try { _engine.Dispose(); } catch { }
+                _engine = null;
             }
-            _http?.Dispose();
+            _serverReady = false;
         }
     }
 }

@@ -19,9 +19,10 @@
 
 	<!-- CharacterIdentityService.cs 已移入项目目录，SDK 风格自动编译，无需显式引用 -->
 
-	<!-- 包含 llama 目录下的所有文件（包括子目录），并复制到输出目录（仅当文件更新时） -->
+	<!-- 原生推理库 Lumina-Engine（P/Invoke 目标），复制到输出目录 -->
 	<ItemGroup>
-		<Content Include="llama\**\*.*" CopyToOutputDirectory="PreserveNewest" />
+		<Content Include="Lumina-Engine\**\*.*" CopyToOutputDirectory="PreserveNewest" />
+		<Content Include="models\**\*.*" CopyToOutputDirectory="PreserveNewest" />
 	</ItemGroup>
 	<ItemGroup>
 	  <None Remove="mcp\WindowsMcp.exe" />
